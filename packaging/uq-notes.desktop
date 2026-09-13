@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=uq notes
+GenericName=Handwritten notes on PDF
+GenericName[ru]=Рукописные заметки поверх PDF
+Comment=Write on PDF documents with a pen
+Comment[ru]=Рукописные заметки поверх PDF с поддержкой пера
+Exec=uq-notes %f
+TryExec=uq-notes
+Icon=uq-notes
+Terminal=false
+Categories=Office;Viewer;
+Keywords=pdf;notes;handwriting;annotate;stylus;
+Keywords[ru]=пдф;заметки;рукописный;перо;конспект;
+MimeType=application/pdf;application/x-uqnotes;
+StartupNotify=true
+StartupWMClass=uq-notes

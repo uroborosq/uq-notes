@@ -1,0 +1,11 @@
+# CMake build trees
+build/
+build-*/
+
+# makepkg output
+packaging/src/
+packaging/pkg/
+packaging/*.pkg.tar*
+
+# Local Claude Code settings
+.claude/settings.local.json

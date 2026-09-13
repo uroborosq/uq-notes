@@ -1,0 +1,31 @@
+#pragma once
+
+#include <QDir>
+#include <QString>
+
+// Путь к сгенерированным тестовым PDF. Файлы не хранятся в репозитории:
+// их собирает uq_make_fixtures на этапе сборки, чтобы они не расходились
+// с генератором.
+namespace fixtures {
+
+inline QString dir()
+{
+    return QStringLiteral("@UQ_FIXTURES_DIR@");
+}
+
+inline QString path(const QString &name)
+{
+    return QDir(dir()).filePath(name);
+}
+
+inline QString textbook() { return path(QStringLiteral("textbook.pdf")); }
+inline QString mixedPages() { return path(QStringLiteral("mixed-pages.pdf")); }
+inline QString noOutline() { return path(QStringLiteral("no-outline.pdf")); }
+inline QString large() { return path(QStringLiteral("large.pdf")); }
+inline QString corrupt() { return path(QStringLiteral("corrupt.pdf")); }
+inline QString encrypted() { return path(QStringLiteral("encrypted.pdf")); }
+
+// Пароль пользователя у encrypted.pdf - для сценария «требует пароль».
+inline QString encryptedPassword() { return QStringLiteral("uq-user-secret"); }
+
+} // namespace fixtures

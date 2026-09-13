@@ -1,0 +1,2 @@
+qt_add_executable(uq_crash_writer main.cpp)
+target_link_libraries(uq_crash_writer PRIVATE uqnotes_core uqnotes_coreplugin)

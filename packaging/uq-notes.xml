@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Тип файла заметки. Наследуется от SQLite: файл .uqn - это база SQLite,
+     и без объявления система опознала бы его именно так. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-uqnotes">
+    <comment>uq notes note</comment>
+    <comment xml:lang="ru">Заметка uq notes</comment>
+    <sub-class-of type="application/vnd.sqlite3"/>
+    <glob pattern="*.uqn"/>
+    <icon name="uq-notes"/>
+  </mime-type>
+</mime-info>

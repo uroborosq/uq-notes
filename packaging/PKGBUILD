@@ -1,0 +1,38 @@
+# Пакет собирается из локального дерева исходников: PKGBUILD лежит в
+# packaging/, а сборка идёт из каталога уровнем выше. Запускать так:
+#
+#   cd packaging && makepkg -f
+#   sudo pacman -U uq-notes-*.pkg.tar.zst
+
+pkgname=uq-notes
+# Держать в согласии с project(... VERSION ...) в корневом CMakeLists.txt.
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Рукописные заметки поверх PDF для Wayland: перо с нажимом, оглавление, экспорт"
+arch=('x86_64')
+url="https://github.com/uroborosq/uq-notes"
+license=('custom')
+
+# QtPdf в Arch поставляется внутри qt6-webengine - отдельного пакета для него нет.
+depends=('qt6-base' 'qt6-declarative' 'qt6-webengine' 'qt6-wayland' 'qpdf'
+         'hicolor-icon-theme')
+makedepends=('cmake' 'librsvg')
+optdepends=('poppler: сторонняя проверка экспортированных PDF')
+
+source=()
+options=('!debug')
+
+_treedir="${startdir}/.."
+
+build() {
+    cmake -S "${_treedir}" -B "${srcdir}/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DUQ_BUILD_TESTS=OFF \
+        -DUQ_DIAGNOSTICS=OFF
+    cmake --build "${srcdir}/build" --parallel
+}
+
+package() {
+    DESTDIR="${pkgdir}" cmake --install "${srcdir}/build"
+}
