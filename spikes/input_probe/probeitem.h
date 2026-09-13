@@ -3,6 +3,8 @@
 #include <QQuickItem>
 #include <QStringList>
 
+class QNativeGestureEvent;
+
 // Единственная точка входа для всех указателей: печатает тип устройства,
 // pointerType и давление для каждого события, а на выходе сводит статистику,
 // по которой видно, годится ли путь через Qt или нужен запасной через libinput.
@@ -32,8 +34,23 @@ protected:
 private:
     void record(const QString &line);
     void note(const QPointerEvent *event, const QEventPoint &point, const QString &kind);
+    void noteGesture(const QNativeGestureEvent *event);
 
     QStringList m_log;
+
+    // Нативные жесты тачпада. По суммам за жест видно, что лежит в value():
+    // приращение масштаба (тогда 1 + Σ value сходится с тем, во сколько раз
+    // свели пальцы) или абсолютный масштаб жеста (тогда сумма уезжает).
+    int m_gestureSequences = 0;
+    int m_zoomEvents = 0;
+    int m_panEvents = 0;
+    int m_rotateEvents = 0;
+    int m_otherGestureEvents = 0;
+    double m_zoomSum = 0.0;
+    QPointF m_panSum;
+    bool m_hasFinishedGesture = false;
+    double m_lastGestureZoomSum = 0.0;
+    QPointF m_lastGesturePanSum;
 
     int m_stylusEvents = 0;
     int m_eraserEvents = 0;

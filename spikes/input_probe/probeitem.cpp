@@ -63,6 +63,20 @@ QString eventKind(QEvent::Type type)
     return QString::fromLatin1(QMetaEnum::fromType<QEvent::Type>().valueToKey(int(type)));
 }
 
+QString gestureTypeName(Qt::NativeGestureType type)
+{
+    switch (type) {
+    case Qt::BeginNativeGesture: return QStringLiteral("Begin");
+    case Qt::EndNativeGesture: return QStringLiteral("End");
+    case Qt::PanNativeGesture: return QStringLiteral("Pan");
+    case Qt::ZoomNativeGesture: return QStringLiteral("Zoom");
+    case Qt::SmartZoomNativeGesture: return QStringLiteral("SmartZoom");
+    case Qt::RotateNativeGesture: return QStringLiteral("Rotate");
+    case Qt::SwipeNativeGesture: return QStringLiteral("Swipe");
+    }
+    return QStringLiteral("NativeGesture(%1)").arg(int(type));
+}
+
 } // namespace
 
 ProbeItem::ProbeItem(QQuickItem *parent)
@@ -85,6 +99,12 @@ void ProbeItem::reset()
     m_maxPressure = -1.0;
     m_lastPressure = -1.0;
     m_pressureOutOfRange = false;
+    m_gestureSequences = m_zoomEvents = m_panEvents = m_rotateEvents = m_otherGestureEvents = 0;
+    m_zoomSum = 0.0;
+    m_panSum = {};
+    m_hasFinishedGesture = false;
+    m_lastGestureZoomSum = 0.0;
+    m_lastGesturePanSum = {};
     emit logChanged();
     emit summaryChanged();
 }
@@ -155,9 +175,65 @@ void ProbeItem::note(const QPointerEvent *event, const QEventPoint &point, const
     emit summaryChanged();
 }
 
+void ProbeItem::noteGesture(const QNativeGestureEvent *event)
+{
+    const auto *device = event->pointingDevice();
+    switch (event->gestureType()) {
+    case Qt::BeginNativeGesture:
+        ++m_gestureSequences;
+        m_zoomSum = 0.0;
+        m_panSum = {};
+        break;
+    case Qt::ZoomNativeGesture:
+        ++m_zoomEvents;
+        m_zoomSum += event->value();
+        break;
+    case Qt::PanNativeGesture:
+        ++m_panEvents;
+        m_panSum += event->delta();
+        break;
+    case Qt::RotateNativeGesture:
+        ++m_rotateEvents;
+        break;
+    case Qt::EndNativeGesture:
+        m_hasFinishedGesture = true;
+        m_lastGestureZoomSum = m_zoomSum;
+        m_lastGesturePanSum = m_panSum;
+        break;
+    default:
+        ++m_otherGestureEvents;
+        break;
+    }
+
+    record(QStringLiteral("NativeGesture %1 dev=%2 pointer=%3 value=%4 delta=%5,%6 pos=%7,%8 "
+                          "fingers=%9 id=%10")
+               .arg(gestureTypeName(event->gestureType()), deviceTypeName(device),
+                    pointerTypeName(device))
+               .arg(event->value(), 0, 'f', 5)
+               .arg(event->delta().x(), 0, 'f', 2)
+               .arg(event->delta().y(), 0, 'f', 2)
+               .arg(event->position().x(), 0, 'f', 1)
+               .arg(event->position().y(), 0, 'f', 1)
+               .arg(event->fingerCount())
+               .arg(device ? device->systemId() : 0));
+    if (event->gestureType() == Qt::EndNativeGesture) {
+        record(QStringLiteral("    gesture total: 1 + sum(zoom value)=%1 sum(pan delta)=%2,%3")
+                   .arg(1.0 + m_zoomSum, 0, 'f', 4)
+                   .arg(m_panSum.x(), 0, 'f', 1)
+                   .arg(m_panSum.y(), 0, 'f', 1));
+    }
+    emit summaryChanged();
+}
+
 bool ProbeItem::event(QEvent *event)
 {
     switch (event->type()) {
+    case QEvent::NativeGesture: {
+        auto *gesture = static_cast<QNativeGestureEvent *>(event);
+        noteGesture(gesture);
+        gesture->accept();
+        return true;
+    }
     case QEvent::TabletPress:
     case QEvent::TabletMove:
     case QEvent::TabletRelease:
@@ -240,6 +316,15 @@ QString ProbeItem::summary() const
            << ", buttons seen: " << (m_buttonsSeen.isEmpty() ? QStringLiteral("(none)")
                                                              : m_buttonsSeen.join(", "))
            << "\n";
+    stream << "native gestures: " << m_gestureSequences << " (zoom: " << m_zoomEvents
+           << ", pan: " << m_panEvents << ", rotate: " << m_rotateEvents
+           << ", other: " << m_otherGestureEvents << ")\n";
+    if (m_hasFinishedGesture) {
+        stream << "last gesture: 1 + sum(zoom value) = "
+               << QString::number(1.0 + m_lastGestureZoomSum, 'f', 4)
+               << ", sum(pan delta) = " << QString::number(m_lastGesturePanSum.x(), 'f', 1) << ","
+               << QString::number(m_lastGesturePanSum.y(), 'f', 1) << "\n";
+    }
     stream << "\nVERDICT\n"
            << "  pressure continuous: "
            << (m_distinctPressureValues > 10 ? "YES" : "NO - fallback to libinput") << "\n"
@@ -251,6 +336,11 @@ QString ProbeItem::summary() const
            << (m_stylusTabletEvents > 0 ? "TabletEvent"
                                         : (m_stylusMouseEvents > 0 ? "MouseEvent with Stylus device"
                                                                    : "NOT SEEN"))
+           << "\n"
+           << "  native gesture reaches item: "
+           << (m_gestureSequences + m_zoomEvents + m_panEvents > 0
+                   ? "YES"
+                   : "NOT SEEN - pinch two fingers on the touchpad")
            << "\n"
            << "  pressure usable from delivered events: "
            << (m_pressureSamples > 0 ? "YES" : "NO - fallback to libinput") << "\n";

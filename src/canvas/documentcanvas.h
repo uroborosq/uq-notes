@@ -279,6 +279,7 @@ private:
 
     bool handleTabletEvent(QTabletEvent *event);
     bool handleMouseEvent(QMouseEvent *event);
+    bool handleNativeGesture(QNativeGestureEvent *event);
     void setStylusInContact(bool inContact);
     void setPointerIsEraser(bool eraser);
     void eraseAt(const QPointF &viewPoint);
@@ -305,6 +306,15 @@ private:
     QPointF m_flickVelocity;
     QElapsedTimer m_flickClock;
     QTimer m_flickTimer;
+
+    // Пинч на тачпаде. Масштаб жеста копится отдельно от m_zoom и выставляется
+    // от начала жеста: zoom = startZoom * scale, где scale = 1 + сумма value().
+    // Тачпад шлёт приращения, и их сумма - ровно масштаб жеста, поэтому пинч
+    // «туда и обратно» возвращает исходный масштаб. Умножение m_zoom на
+    // (1 + value) так не умеет (design.md, D3).
+    bool m_gestureActive = false;
+    qreal m_gestureStartZoom = 1.0;
+    qreal m_gestureScale = 1.0;
 
     // Тесселированные штрихи страницы. Кэш живёт ровно на тех страницах, что
     // держатся в зоне удержания: документ на 200 страниц не должен хранить

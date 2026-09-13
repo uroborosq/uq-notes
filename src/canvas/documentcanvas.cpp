@@ -1304,6 +1304,10 @@ bool DocumentCanvas::event(QEvent *event)
         if (handleMouseEvent(static_cast<QMouseEvent *>(event)))
             return true;
         break;
+    case QEvent::NativeGesture:
+        if (handleNativeGesture(static_cast<QNativeGestureEvent *>(event)))
+            return true;
+        break;
     default:
         break;
     }
@@ -1415,4 +1419,52 @@ bool DocumentCanvas::handleMouseEvent(QMouseEvent *event)
         break;
     }
     return false;
+}
+
+// Пинч на тачпаде приходит не касаниями, а готовым жестом: Qt Wayland
+// превращает zwp_pointer_gestures_v1 в последовательность Begin -> Pan / Rotate /
+// Zoom -> End. PinchHandler в QML его не видит - ему нужны точки касания.
+bool DocumentCanvas::handleNativeGesture(QNativeGestureEvent *event)
+{
+    const auto startGesture = [this] {
+        // Новый жест отменяет инерцию - как у жестовых обработчиков в QML.
+        stopFlick();
+        m_gestureActive = true;
+        m_gestureStartZoom = m_zoom;
+        m_gestureScale = 1.0;
+    };
+
+    switch (event->gestureType()) {
+    case Qt::BeginNativeGesture:
+        startGesture();
+        break;
+    case Qt::EndNativeGesture:
+        // Инерции у тачпада нет: пальцы оторвались - документ стоит, где стоял.
+        m_gestureActive = false;
+        break;
+    case Qt::ZoomNativeGesture:
+        // Приоритет у штриха: пока перо в контакте, жест ничего не двигает.
+        if (m_stylusInContact)
+            break;
+        // Begin пропущен - жест начался вне холста. Начинаем его с середины.
+        if (!m_gestureActive)
+            startGesture();
+        // Накопитель зажат по границам масштаба: на упоре обратное движение
+        // пальцев сразу уменьшает масштаб, а не отматывает перелёт (D4).
+        m_gestureScale = qBound(kMinZoom / m_gestureStartZoom, m_gestureScale + event->value(),
+                                kMaxZoom / m_gestureStartZoom);
+        zoomAt(event->position(), m_gestureStartZoom * m_gestureScale);
+        break;
+    case Qt::PanNativeGesture:
+        if (!m_stylusInContact)
+            panBy(event->delta());
+        break;
+    case Qt::RotateNativeGesture:
+        // Поворота холста нет. Событие принимается, чтобы не досталось родителю.
+        break;
+    default:
+        return false;
+    }
+    event->accept();
+    return true;
 }

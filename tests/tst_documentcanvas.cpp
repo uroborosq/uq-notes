@@ -5,11 +5,14 @@
 // Тесты работают без окна: холст считает раскладку, зону удержания и запросы
 // рендера сам, а граф сцены здесь не нужен - проверяется наблюдаемое состояние.
 
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
 #include <QSignalSpy>
 #include <QTest>
 
 #include "canvas/documentcanvas.h"
 #include "fixtures.h"
+#include "ink/inkdocument.h"
 #include "pdf/pdfdocumentmodel.h"
 
 class TestDocumentCanvas : public QObject
@@ -36,6 +39,57 @@ private:
             return false;
         QTest::qWait(200);
         return waitForTextures(canvas, timeoutMs);
+    }
+
+    // Тестовый тачпад. Qt держит устройства ввода в глобальном списке, а
+    // события ссылаются на них по указателю, поэтому устройство создаётся один
+    // раз и живёт до конца процесса - как в tst_canvasink.
+    static const QPointingDevice *touchpad()
+    {
+        static auto *device = new QPointingDevice(
+            QStringLiteral("test touchpad"), 4, QInputDevice::DeviceType::TouchPad,
+            QPointingDevice::PointerType::Finger, QInputDevice::Capability::Position, 2, 0);
+        return device;
+    }
+
+    struct GestureStep
+    {
+        Qt::NativeGestureType type;
+        qreal value = 0.0;
+        QPointF delta;
+    };
+
+    static GestureStep zoomStep(qreal value) { return {Qt::ZoomNativeGesture, value, {}}; }
+    static GestureStep panStep(const QPointF &delta) { return {Qt::PanNativeGesture, 0.0, delta}; }
+
+    // Одно событие пинча на тачпаде. Позиция - курсор: за жест она не
+    // меняется, так жест приходит на целевом устройстве (spikes/FINDINGS.md).
+    static bool sendGestureEvent(DocumentCanvas *canvas, const GestureStep &step,
+                                 const QPointF &cursor)
+    {
+        QNativeGestureEvent event(step.type, touchpad(), 2, cursor, cursor, cursor, step.value,
+                                  step.delta);
+        event.setAccepted(false);
+        QCoreApplication::sendEvent(canvas, &event);
+        return event.isAccepted();
+    }
+
+    // Жест целиком: Begin -> шаги -> End. Истина, если приняты все события.
+    static bool sendGesture(DocumentCanvas *canvas, const QPointF &cursor,
+                            const QList<GestureStep> &steps)
+    {
+        bool accepted = sendGestureEvent(canvas, {Qt::BeginNativeGesture}, cursor);
+        for (const GestureStep &step : steps)
+            accepted = sendGestureEvent(canvas, step, cursor) && accepted;
+        return sendGestureEvent(canvas, {Qt::EndNativeGesture}, cursor) && accepted;
+    }
+
+    static QByteArray zoomMessage(qreal actual, qreal expected)
+    {
+        return QStringLiteral("масштаб %1, ожидался %2")
+            .arg(actual, 0, 'g', 12)
+            .arg(expected, 0, 'g', 12)
+            .toUtf8();
     }
 
 private slots:
@@ -425,6 +479,304 @@ private slots:
         const qreal position = canvas.visibleDocumentRect().top();
         QTest::qWait(120);
         QCOMPARE(canvas.visibleDocumentRect().top(), position);
+    }
+
+    // --- Пинч на тачпаде ---------------------------------------------------
+    // Требование «Масштабирование пинчем на тачпаде» из canvas-view. Жест
+    // шлётся холсту событиями напрямую, без окна и без тачпада (design.md, D8).
+
+    // Сценарий «Сведение и разведение пальцев на тачпаде»: масштаб идёт вслед
+    // за жестом мелкими шагами, а точка документа под курсором стоит на месте.
+    void touchpadPinchZoomsContinuouslyAroundCursor()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(2.5);
+
+        const QPointF cursor(320, 240);
+        const QPointF anchor = canvas.viewToDocument(cursor);
+        // Шаг - квант тачпада на целевом устройстве, 1/256 масштаба жеста.
+        // Разведение до 1.5 от исходного, затем сведение до 1.25.
+        const qreal quantum = 1.0 / 256.0;
+        QList<qreal> steps(128, quantum);
+        steps.append(QList<qreal>(64, -quantum));
+
+        QVERIFY(sendGestureEvent(&canvas, {Qt::BeginNativeGesture}, cursor));
+        qreal previous = canvas.zoom();
+        for (int i = 0; i < steps.size(); ++i) {
+            QVERIFY(sendGestureEvent(&canvas, zoomStep(steps[i]), cursor));
+            const qreal zoom = canvas.zoom();
+            QVERIFY2(steps[i] > 0 ? zoom > previous : zoom < previous,
+                     qPrintable(QStringLiteral("шаг %1: масштаб %2 -> %3")
+                                    .arg(i)
+                                    .arg(previous, 0, 'g', 12)
+                                    .arg(zoom, 0, 'g', 12)));
+            previous = zoom;
+
+            const QPointF now = canvas.viewToDocument(cursor);
+            QVERIFY2(qAbs(now.x() - anchor.x()) < 0.5 && qAbs(now.y() - anchor.y()) < 0.5,
+                     qPrintable(QStringLiteral("шаг %1: точка под курсором %2,%3 -> %4,%5")
+                                    .arg(i)
+                                    .arg(anchor.x())
+                                    .arg(anchor.y())
+                                    .arg(now.x())
+                                    .arg(now.y())));
+        }
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+        QVERIFY2(qAbs(canvas.zoom() - 2.5 * 1.25) < 1e-9,
+                 zoomMessage(canvas.zoom(), 2.5 * 1.25).constData());
+    }
+
+    // Сценарий «Возврат пальцев в исходное положение»: развести до 2x и свести
+    // теми же шагами обратно - масштаб ровно исходный. Накопление умножением
+    // этот тест валит: произведение (1 + v)(1 - v) меньше единицы.
+    void touchpadPinchThereAndBackRestoresZoom()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(1.3);
+
+        const QPointF cursor(450, 350);
+        const qreal start = canvas.zoom();
+        // Шаги неравные, как у настоящего жеста, а в сумме - ровно удвоение.
+        const QList<qreal> spread = {0.05, 0.1, 0.02, 0.2, 0.13, 0.25, 0.25};
+
+        QVERIFY(sendGestureEvent(&canvas, {Qt::BeginNativeGesture}, cursor));
+        for (qreal value : spread)
+            QVERIFY(sendGestureEvent(&canvas, zoomStep(value), cursor));
+        QVERIFY2(qAbs(canvas.zoom() - 2.0 * start) < 1e-9,
+                 zoomMessage(canvas.zoom(), 2.0 * start).constData());
+
+        for (auto it = spread.crbegin(); it != spread.crend(); ++it)
+            QVERIFY(sendGestureEvent(&canvas, zoomStep(-*it), cursor));
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+
+        QVERIFY2(qAbs(canvas.zoom() - start) < 1e-9, zoomMessage(canvas.zoom(), start).constData());
+    }
+
+    // Сценарий «Упор в границу диапазона»: за границей масштаб и документ
+    // стоят, а обратное движение пальцев сразу уменьшает масштаб.
+    void touchpadPinchAtRangeLimitReversesImmediately()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(6.0);
+
+        const QPointF cursor(450, 350);
+        QVERIFY(sendGestureEvent(&canvas, {Qt::BeginNativeGesture}, cursor));
+        // 6 * (1 + 7 * 0.05) = 8.1 - уже за границей.
+        for (int i = 0; i < 7; ++i)
+            QVERIFY(sendGestureEvent(&canvas, zoomStep(0.05), cursor));
+        QCOMPARE(canvas.zoom(), canvas.maxZoom());
+        const QRectF atLimit = canvas.visibleDocumentRect();
+
+        // Пальцы расходятся дальше: ни масштаб, ни документ не двигаются.
+        for (int i = 0; i < 40; ++i) {
+            QVERIFY(sendGestureEvent(&canvas, zoomStep(0.05), cursor));
+            QCOMPARE(canvas.zoom(), canvas.maxZoom());
+            QCOMPARE(canvas.visibleDocumentRect(), atLimit);
+        }
+
+        // Первое же обратное приращение уменьшает масштаб - от упора, а не от
+        // того, куда пальцы ушли бы без него: 8.0 - 6.0 * 0.05.
+        QVERIFY(sendGestureEvent(&canvas, zoomStep(-0.05), cursor));
+        QVERIFY2(qAbs(canvas.zoom() - 7.7) < 1e-9, zoomMessage(canvas.zoom(), 7.7).constData());
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+    }
+
+    // Сценарий «Одновременный сдвиг и масштаб на тачпаде»: сдвиг пальцев тянет
+    // документ, а масштаб в том же жесте держит точку под курсором.
+    void touchpadPanAndZoomInOneGesture()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(2.5);
+
+        const QPointF cursor(320, 240);
+        QVERIFY(sendGestureEvent(&canvas, {Qt::BeginNativeGesture}, cursor));
+
+        // Пальцы вверх - документ вверх: 120 пикселей элемента - это 120 / zoom
+        // точек документа.
+        const QRectF before = canvas.visibleDocumentRect();
+        QVERIFY(sendGestureEvent(&canvas, panStep(QPointF(0, -120)), cursor));
+        const QRectF panned = canvas.visibleDocumentRect();
+        QVERIFY2(qAbs((panned.top() - before.top()) - 120.0 / 2.5) < 1e-6,
+                 qPrintable(QStringLiteral("верх %1 -> %2").arg(before.top()).arg(panned.top())));
+        QVERIFY(qAbs(panned.left() - before.left()) < 1e-6);
+
+        const QPointF anchor = canvas.viewToDocument(cursor);
+        QVERIFY(sendGestureEvent(&canvas, zoomStep(0.2), cursor));
+        const QPointF afterZoom = canvas.viewToDocument(cursor);
+        QVERIFY2(qAbs(canvas.zoom() - 3.0) < 1e-9, zoomMessage(canvas.zoom(), 3.0).constData());
+        QVERIFY2(qAbs(afterZoom.x() - anchor.x()) < 0.5 && qAbs(afterZoom.y() - anchor.y()) < 0.5,
+                 qPrintable(QStringLiteral("точка под курсором %1,%2 -> %3,%4")
+                                .arg(anchor.x())
+                                .arg(anchor.y())
+                                .arg(afterZoom.x())
+                                .arg(afterZoom.y())));
+
+        // Сдвиг после масштаба тянет документ уже в новом масштабе.
+        const QRectF zoomed = canvas.visibleDocumentRect();
+        QVERIFY(sendGestureEvent(&canvas, panStep(QPointF(0, -60)), cursor));
+        QVERIFY(qAbs((canvas.visibleDocumentRect().top() - zoomed.top()) - 60.0 / 3.0) < 1e-6);
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+    }
+
+    // Сценарий «Поворот пальцев»: поворот принимается, чтобы не достался
+    // родителю, но не меняет ни масштаба, ни положения документа.
+    void touchpadRotateIsIgnored()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(2.0);
+
+        const QPointF cursor(450, 350);
+        const QRectF rect = canvas.visibleDocumentRect();
+
+        QVERIFY(sendGestureEvent(&canvas, {Qt::BeginNativeGesture}, cursor));
+        for (int i = 0; i < 20; ++i) {
+            QVERIFY2(sendGestureEvent(&canvas, {Qt::RotateNativeGesture, 1.7, {}}, cursor),
+                     "поворот не принят и уйдёт родителю");
+        }
+        QCOMPARE(canvas.zoom(), 2.0);
+        QCOMPARE(canvas.visibleDocumentRect(), rect);
+
+        // Вперемешку с масштабом поворот тоже ничего не добавляет.
+        QVERIFY(sendGestureEvent(&canvas, {Qt::RotateNativeGesture, 5.0, {}}, cursor));
+        QVERIFY(sendGestureEvent(&canvas, zoomStep(0.1), cursor));
+        QVERIFY(sendGestureEvent(&canvas, {Qt::RotateNativeGesture, -8.0, {}}, cursor));
+        QVERIFY(sendGestureEvent(&canvas, zoomStep(0.1), cursor));
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+        QVERIFY2(qAbs(canvas.zoom() - 2.4) < 1e-9, zoomMessage(canvas.zoom(), 2.4).constData());
+    }
+
+    // Сценарий «Завершение жеста на тачпаде»: документ встаёт сразу, без
+    // доводки по инерции. Заодно новый жест гасит инерцию сенсорного броска.
+    void touchpadGestureEndsWithoutInertia()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::large()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(1.0);
+
+        const QPointF cursor(450, 350);
+        canvas.flick(QPointF(0, -3000));
+        QVERIFY(canvas.isFlicking());
+        QVERIFY(sendGestureEvent(&canvas, {Qt::BeginNativeGesture}, cursor));
+        QVERIFY(!canvas.isFlicking());
+
+        // Быстрое сведение со сдвигом.
+        for (int i = 0; i < 12; ++i) {
+            QVERIFY(sendGestureEvent(&canvas, panStep(QPointF(0, -80)), cursor));
+            QVERIFY(sendGestureEvent(&canvas, zoomStep(-0.03), cursor));
+        }
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+        QVERIFY(!canvas.isFlicking());
+
+        const qreal zoom = canvas.zoom();
+        const QRectF rect = canvas.visibleDocumentRect();
+        QTest::qWait(200);
+        QVERIFY(!canvas.isFlicking());
+        QCOMPARE(canvas.zoom(), zoom);
+        QCOMPARE(canvas.visibleDocumentRect(), rect);
+    }
+
+    // Сценарий «Прежние способы масштабирования не затронуты»: после пинча
+    // масштаб меняется как прежде, а следующий пинч продолжает с того масштаба,
+    // на котором остановились, - в том числе когда Begin до холста не дошёл.
+    void touchpadPinchContinuesFromZoomSetElsewhere()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setZoom(1.0);
+
+        const QPointF cursor(450, 350);
+        QVERIFY(sendGesture(&canvas, cursor, {zoomStep(0.5), zoomStep(0.5)}));
+        QVERIFY2(qAbs(canvas.zoom() - 2.0) < 1e-9, zoomMessage(canvas.zoom(), 2.0).constData());
+
+        canvas.zoomBy(cursor, 1.5); // Ctrl + колесо
+        QVERIFY2(qAbs(canvas.zoom() - 3.0) < 1e-9, zoomMessage(canvas.zoom(), 3.0).constData());
+
+        QVERIFY(sendGesture(&canvas, cursor, {zoomStep(0.1)}));
+        QVERIFY2(qAbs(canvas.zoom() - 3.3) < 1e-9, zoomMessage(canvas.zoom(), 3.3).constData());
+
+        // Жест начался вне холста: Begin сюда не пришёл.
+        canvas.setZoom(2.0); // кнопка на панели
+        QVERIFY(sendGestureEvent(&canvas, zoomStep(0.5), cursor));
+        QVERIFY(sendGestureEvent(&canvas, {Qt::EndNativeGesture}, cursor));
+        QVERIFY2(qAbs(canvas.zoom() - 3.0) < 1e-9, zoomMessage(canvas.zoom(), 3.0).constData());
+    }
+
+    // Сценарий «Пинч во время штриха пером»: пока перо в контакте, жест
+    // принимается, но ничего не двигает, а штрих не рвётся. После штриха тот же
+    // жест масштаб меняет.
+    void touchpadPinchWaitsForStylusStroke()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        InkDocument ink;
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setInk(&ink);
+        canvas.setPageMode(DocumentCanvas::PageMode::Single);
+        canvas.goToPage(0);
+
+        const QPointF cursor(450, 350);
+        const qreal zoom = canvas.zoom();
+        const QRectF rect = canvas.visibleDocumentRect();
+        const QList<GestureStep> pinch = {zoomStep(0.5), panStep(QPointF(0, -80)), zoomStep(0.2)};
+
+        // Штрих слева направо, жест приходит на середине.
+        QVERIFY(canvas.beginInkAt(QPointF(400, 350), 0.5, false));
+        for (int i = 1; i <= 12; ++i)
+            canvas.continueInkAt(QPointF(400 + i * 5, 350), 0.5);
+
+        QVERIFY2(sendGesture(&canvas, cursor, pinch), "жест во время штриха должен приниматься");
+        QCOMPARE(canvas.zoom(), zoom);
+        QCOMPARE(canvas.visibleDocumentRect(), rect);
+        QVERIFY2(canvas.isDrawing(), "штрих прервался на жесте");
+
+        for (int i = 13; i <= 24; ++i)
+            canvas.continueInkAt(QPointF(400 + i * 5, 350), 0.5);
+        canvas.endInk();
+
+        // Штрих один и дошёл дальше того места, где пришёл жест.
+        QCOMPARE(ink.strokeCount(), 1);
+        const int page = canvas.pageAtView(QPointF(400, 350));
+        QVERIFY(page >= 0);
+        const Stroke &stroke = ink.strokesOnPage(page).first().stroke;
+        QVERIFY(stroke.points.size() > 1);
+        const qreal gestureX = canvas.viewToPage(page, QPointF(460, 350)).x();
+        QVERIFY2(stroke.points.last().position.x() > gestureX,
+                 qPrintable(QStringLiteral("штрих кончился на x=%1, жест пришёл на x=%2")
+                                .arg(stroke.points.last().position.x())
+                                .arg(gestureX)));
+
+        // Перо поднято - тот же жест масштабирует.
+        QVERIFY(sendGesture(&canvas, cursor, pinch));
+        QVERIFY2(qAbs(canvas.zoom() - zoom * 1.7) < 1e-9,
+                 zoomMessage(canvas.zoom(), zoom * 1.7).constData());
     }
 
     // Задача 6.2, сценарий «Клик по пункту»: вид перемещается к целевой
