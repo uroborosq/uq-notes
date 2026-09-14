@@ -179,6 +179,17 @@ ApplicationWindow {
                 checked: canvas.tool === DocumentCanvas.Eraser
                 onClicked: canvas.tool = DocumentCanvas.Eraser
             }
+            // Инструмент на одно касание: ставит вкладыш и сам возвращает
+            // прежний инструмент.
+            ToolButton {
+                text: qsTr("Вкладыш")
+                checkable: true
+                checked: canvas.tool === DocumentCanvas.Insert
+                enabled: document.ready
+                ToolTip.text: qsTr("Коснитесь страницы, чтобы вложить листок для записей")
+                ToolTip.visible: hovered
+                onClicked: canvas.tool = DocumentCanvas.Insert
+            }
             ToolButton {
                 id: penSettingsButton
                 text: qsTr("▾")
@@ -519,6 +530,157 @@ ApplicationWindow {
                     canvas.panBy(Qt.point(centroid.position.x - lastCentroid.x,
                                           centroid.position.y - lastCentroid.y))
                     lastCentroid = centroid.position
+                }
+            }
+
+            // Элементы управления вкладышами: значок свёрнутого, кнопки
+            // «свернуть» и «удалить» и ручка размера раскрытого (design.md, D5).
+            //
+            // Сам слой ввод не принимает: вне элементов перо и мышь проходят к
+            // холсту, пальцы - к жестам. Элементы - MouseArea: они забирают
+            // нажатие целиком, и касание значка пером не ставит под ним точку.
+            // Положение считается привязками к масштабу и сдвигу холста, в том
+            // же кадре, что и граф сцены; модель на зуме не меняется.
+            Item {
+                id: insertOverlay
+                objectName: "insertOverlay"
+                anchors.fill: parent
+                // Ладонь или рукав во время штриха не свернёт вкладыш.
+                enabled: !canvas.stylusActive
+
+                component InsertButton: Rectangle {
+                    id: button
+                    property alias label: glyph.text
+                    property string hint
+                    signal activated()
+
+                    width: 28
+                    height: 28
+                    radius: 5
+                    color: area.pressed ? "#3c5a86" : "#2a2a34"
+                    border.color: "#55555f"
+
+                    Text {
+                        id: glyph
+                        anchors.centerIn: parent
+                        color: "#e2e2ea"
+                        font.pixelSize: 15
+                    }
+                    MouseArea {
+                        id: area
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: button.activated()
+                    }
+                    ToolTip.text: hint
+                    ToolTip.visible: area.containsMouse && hint.length > 0
+                }
+
+                Repeater {
+                    model: canvas.insertModel
+
+                    delegate: Item {
+                        id: insertControls
+                        objectName: "insertControls"
+
+                        required property var insertId
+                        required property rect docRect
+                        required property bool open
+                        required property int stack
+
+                        z: stack
+
+                        // Рамка вкладыша в пикселях холста.
+                        readonly property real frameX: docRect.x * canvas.zoom + canvas.originX
+                        readonly property real frameY: docRect.y * canvas.zoom + canvas.originY
+                        readonly property real frameWidth: docRect.width * canvas.zoom
+                        readonly property real frameHeight: docRect.height * canvas.zoom
+
+                        // Свёрнутый: значок по центру точки установки. Размер
+                        // идёт за масштабом страницы, но в пределах: мельче
+                        // по нему не попасть, крупнее он закрывает текст.
+                        Rectangle {
+                            objectName: "insertAnchor"
+                            readonly property real size:
+                                Math.max(28, Math.min(112, 56 * canvas.zoom))
+
+                            visible: !insertControls.open
+                            x: insertControls.frameX - width / 2
+                            y: insertControls.frameY - height / 2
+                            width: size
+                            height: size
+                            radius: size / 2
+                            color: anchorArea.pressed ? "#5aaee6" : "#7cc4f2"
+                            border.color: "#2f6f9a"
+                            border.width: Math.max(1, size / 28)
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✎"
+                                color: "#0f3450"
+                                font.pixelSize: parent.size * 0.54
+                            }
+                            MouseArea {
+                                id: anchorArea
+                                anchors.fill: parent
+                                onClicked: canvas.openInsert(insertControls.insertId)
+                            }
+                        }
+
+                        // Раскрытый: кнопки над правым верхним краем рамки, чтобы
+                        // не отнимать места для письма.
+                        Row {
+                            visible: insertControls.open
+                            x: insertControls.frameX + insertControls.frameWidth - width
+                            y: insertControls.frameY - height - 3
+                            spacing: 3
+
+                            InsertButton {
+                                objectName: "insertClose"
+                                label: "▁"
+                                hint: qsTr("Свернуть")
+                                onActivated: canvas.closeInsert(insertControls.insertId)
+                            }
+                            InsertButton {
+                                objectName: "insertDelete"
+                                label: "✕"
+                                hint: qsTr("Удалить вкладыш")
+                                onActivated: canvas.deleteInsert(insertControls.insertId)
+                            }
+                        }
+
+                        // Ручка размера в правом нижнем углу. Левый верхний угол
+                        // стоит на месте, минимальный размер зажимает холст.
+                        Rectangle {
+                            objectName: "insertResize"
+                            visible: insertControls.open
+                            width: 22
+                            height: 22
+                            radius: 4
+                            x: insertControls.frameX + insertControls.frameWidth - width / 2
+                            y: insertControls.frameY + insertControls.frameHeight - height / 2
+                            color: resizeArea.pressed ? "#3c5a86" : "#2a2a34"
+                            border.color: "#55555f"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "⤡"
+                                color: "#e2e2ea"
+                                font.pixelSize: 13
+                            }
+                            MouseArea {
+                                id: resizeArea
+                                anchors.fill: parent
+                                preventStealing: true
+                                onPositionChanged: function (mouse) {
+                                    if (!pressed)
+                                        return
+                                    canvas.resizeInsert(insertControls.insertId,
+                                                        mapToItem(canvas, mouse.x, mouse.y))
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

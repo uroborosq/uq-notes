@@ -5,12 +5,84 @@
 #include <QCryptographicHash>
 #include <QFile>
 #include <QSignalSpy>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QUuid>
 
 #include "fixtures.h"
 #include "ink/inkdocument.h"
 #include "storage/notestore.h"
+
+namespace {
+
+// Прямой доступ к файлу заметки мимо NoteStore: так тесты изображают файл
+// первой версии и то, что с файлом делает версия без вкладышей.
+class RawNote
+{
+public:
+    explicit RawNote(const QString &path)
+        : m_name(QStringLiteral("raw-%1").arg(QUuid::createUuid().toString(QUuid::Id128)))
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_name);
+        db.setDatabaseName(path);
+        m_ok = db.open();
+    }
+
+    ~RawNote()
+    {
+        QSqlDatabase::database(m_name, false).close();
+        QSqlDatabase::removeDatabase(m_name);
+    }
+
+    bool isOpen() const { return m_ok; }
+
+    bool exec(const QString &statement, const QVariantList &values = {})
+    {
+        QSqlQuery query(QSqlDatabase::database(m_name, false));
+        query.prepare(statement);
+        for (const QVariant &value : values)
+            query.addBindValue(value);
+        if (!query.exec()) {
+            qWarning() << "raw sql failed:" << statement << query.lastError().text();
+            return false;
+        }
+        return true;
+    }
+
+    // Первая колонка всех строк результата.
+    QVariantList column(const QString &statement)
+    {
+        QVariantList values;
+        QSqlQuery query(QSqlDatabase::database(m_name, false));
+        if (!query.exec(statement)) {
+            qWarning() << "raw sql failed:" << statement << query.lastError().text();
+            return values;
+        }
+        while (query.next())
+            values.append(query.value(0));
+        return values;
+    }
+
+private:
+    QString m_name;
+    bool m_ok = false;
+};
+
+// Точки в формате файла: три float на точку.
+QByteArray packedLine(int count)
+{
+    QByteArray blob;
+    for (int i = 0; i < count; ++i) {
+        const float values[3] = {float(10 + i * 4), 50.0f, 0.5f};
+        blob.append(reinterpret_cast<const char *>(values), sizeof(values));
+    }
+    return blob;
+}
+
+} // namespace
 
 class TestNoteStore : public QObject
 {
@@ -496,6 +568,316 @@ private slots:
         QVERIFY(reopened.load(&again));
         QCOMPARE(again.strokeCount(), 3);
         QVERIFY(again.hasInkOnPage(12));
+    }
+
+    // --- Вкладыши (задачи 2.1-2.4, 2.6 add-ink-inserts) --------------------
+
+    // Задача 2.1 и сценарий «Старая заметка»: файл первой версии открывается,
+    // получает таблицы вкладышей и принимает новый вкладыш.
+    void opensSchemaVersionOneNote()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("w.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        {
+            RawNote raw(note);
+            QVERIFY(raw.isOpen());
+            // Схема ровно такая, какой её создавала версия 1.
+            QVERIFY(raw.exec(QStringLiteral(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")));
+            QVERIFY(raw.exec(QStringLiteral(
+                "CREATE TABLE stroke (id INTEGER PRIMARY KEY, page INTEGER NOT NULL, "
+                "tool INTEGER NOT NULL, color INTEGER NOT NULL, width REAL NOT NULL, "
+                "points BLOB NOT NULL)")));
+            QVERIFY(raw.exec(QStringLiteral("CREATE INDEX stroke_page ON stroke(page)")));
+            QVERIFY(raw.exec(QStringLiteral(
+                "CREATE TABLE view_state (id INTEGER PRIMARY KEY CHECK (id = 1), "
+                "page INTEGER NOT NULL, zoom REAL NOT NULL, page_mode INTEGER NOT NULL, "
+                "origin_x REAL NOT NULL, origin_y REAL NOT NULL)")));
+            const QList<QPair<QString, QString>> metas = {
+                {QStringLiteral("schema"), QStringLiteral("1")},
+                {QStringLiteral("source_path"), QFileInfo(pdf).absoluteFilePath()},
+                {QStringLiteral("source_size"), QString::number(QFileInfo(pdf).size())},
+                {QStringLiteral("source_hash"), NoteStore::hashOfFile(pdf)},
+            };
+            for (const auto &[key, value] : metas) {
+                QVERIFY(raw.exec(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?)"),
+                                 {key, value}));
+            }
+            for (int id = 1; id <= 2; ++id) {
+                QVERIFY(raw.exec(QStringLiteral("INSERT INTO stroke(id, page, tool, color, "
+                                                "width, points) VALUES(?, ?, 0, ?, 2.0, ?)"),
+                                 {id, id * 3, QColor(Qt::black).rgba(), packedLine(12)}));
+            }
+        }
+
+        quint64 insert = 0;
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY2(store.openNote(note), qPrintable(store.errorString()));
+            QVERIFY2(store.load(&ink), qPrintable(store.errorString()));
+            QCOMPARE(store.sourceState(), NoteStore::SourceState::Ok);
+            QCOMPARE(ink.strokeCount(), 2);
+            QCOMPARE(ink.pagesWithInk(), QList<int>({3, 6}));
+            QCOMPARE(ink.insertCount(), 0);
+
+            // В старую заметку добавляется вкладыш, и он сохраняется.
+            store.attach(&ink);
+            insert = ink.addInsert(1, QRectF(30, 40, 200, 140));
+            Stroke stroke = lineOnPage(0);
+            stroke.insert = insert;
+            QVERIFY(ink.addStroke(stroke) > 2);
+            QVERIFY(store.flush());
+        }
+
+        {
+            RawNote raw(note);
+            QCOMPARE(raw.column(QStringLiteral("SELECT value FROM meta WHERE key = 'schema'")),
+                     QVariantList({QStringLiteral("2")}));
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+        QCOMPARE(ink.allStrokes().size(), 2);
+        QVERIFY(ink.hasInsert(insert));
+        QCOMPARE(ink.strokesInInsert(insert).size(), 1);
+    }
+
+    // Задача 2.2, сценарий «Повторное открытие заметки с вкладышами».
+    void roundTripsInserts()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("x.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        quint64 closed = 0;
+        quint64 resized = 0;
+        QList<InkDocument::Record> originalInk;
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.create(note, pdf));
+            store.attach(&ink);
+
+            ink.addStroke(lineOnPage(0));
+            closed = ink.addInsert(0, QRectF(100, 120, 200, 140));
+            resized = ink.addInsert(4, QRectF(20, 30, 200, 140));
+            for (const quint64 insert : {closed, resized}) {
+                for (int i = 0; i < 2; ++i) {
+                    Stroke stroke = lineOnPage(0, i * 20.0);
+                    stroke.insert = insert;
+                    QVERIFY(ink.addStroke(stroke) != 0);
+                }
+            }
+            QVERIFY(store.isDirty());
+            QVERIFY(store.flush());
+            QVERIFY(!store.isDirty());
+
+            // Сворачивание и размер - тоже изменения, которые надо записать.
+            ink.setInsertOpen(closed, false);
+            QVERIFY(store.isDirty());
+            ink.setInsertRect(resized, QRectF(20, 30, 310, 95));
+            QVERIFY(store.flush());
+            originalInk = ink.allInsertStrokes();
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+
+        QCOMPARE(ink.insertCount(), 2);
+        QVERIFY(!ink.insertById(closed).open);
+        QCOMPARE(ink.insertById(closed).page, 0);
+        QCOMPARE(ink.insertById(closed).rect, QRectF(100, 120, 200, 140));
+        QVERIFY(ink.insertById(resized).open);
+        QCOMPARE(ink.insertById(resized).page, 4);
+        QCOMPARE(ink.insertById(resized).rect, QRectF(20, 30, 310, 95));
+        QCOMPARE(ink.allStrokes().size(), 1);
+
+        const QList<InkDocument::Record> restored = ink.allInsertStrokes();
+        QCOMPARE(restored.size(), originalInk.size());
+        for (int i = 0; i < restored.size(); ++i) {
+            QCOMPARE(restored[i].id, originalInk[i].id);
+            QCOMPARE(restored[i].stroke.insert, originalInk[i].stroke.insert);
+            QCOMPARE(restored[i].stroke.page, originalInk[i].stroke.page);
+            QCOMPARE(restored[i].stroke.color, originalInk[i].stroke.color);
+            QCOMPARE(restored[i].stroke.points.size(), originalInk[i].stroke.points.size());
+            for (int p = 0; p < restored[i].stroke.points.size(); ++p) {
+                const QPointF a = restored[i].stroke.points[p].position;
+                const QPointF b = originalInk[i].stroke.points[p].position;
+                QVERIFY(qAbs(a.x() - b.x()) < 1e-3 && qAbs(a.y() - b.y()) < 1e-3);
+            }
+        }
+    }
+
+    // Удаление вкладыша уезжает в файл вместе со штрихами, отмена - обратно.
+    void removedInsertLeavesNoRows()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("y.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.create(note, pdf));
+        store.attach(&ink);
+        const quint64 insert = ink.addInsert(2, QRectF(0, 0, 100, 100));
+        Stroke stroke = lineOnPage(0);
+        stroke.insert = insert;
+        ink.addStroke(stroke);
+        QVERIFY(store.flush());
+
+        ink.removeInsert(insert);
+        QVERIFY(store.flush());
+        {
+            RawNote raw(note);
+            QVERIFY(raw.column(QStringLiteral("SELECT id FROM ink_insert")).isEmpty());
+            QVERIFY(raw.column(QStringLiteral("SELECT id FROM insert_stroke")).isEmpty());
+        }
+
+        ink.undo();
+        QVERIFY(store.flush());
+        RawNote raw(note);
+        QCOMPARE(raw.column(QStringLiteral("SELECT id FROM ink_insert")).size(), 1);
+        QCOMPARE(raw.column(QStringLiteral("SELECT id FROM insert_stroke")).size(), 1);
+    }
+
+    // Задача 2.3: версия без вкладышей записала штрих страницы с id, занятым
+    // штрихом вкладыша.
+    void renumbersInsertStrokesCollidingWithPageStrokes()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("z.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        quint64 insert = 0;
+        quint64 collidingId = 0;
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.create(note, pdf));
+            store.attach(&ink);
+            ink.addStroke(lineOnPage(0));
+            insert = ink.addInsert(0, QRectF(0, 0, 200, 140));
+            Stroke stroke = lineOnPage(0, 40.0);
+            stroke.insert = insert;
+            collidingId = ink.addStroke(stroke);
+            QVERIFY(store.flush());
+        }
+        {
+            // Так пишет версия 0.3.0: id от максимума таблицы stroke.
+            RawNote raw(note);
+            QVERIFY(raw.exec(QStringLiteral("INSERT INTO stroke(id, page, tool, color, width, "
+                                            "points) VALUES(?, 1, 0, ?, 2.0, ?)"),
+                             {qulonglong(collidingId), QColor(Qt::red).rgba(), packedLine(10)}));
+        }
+
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.openNote(note));
+            QVERIFY2(store.load(&ink), qPrintable(store.errorString()));
+            QCOMPARE(ink.allStrokes().size(), 2);
+            QCOMPARE(ink.strokesInInsert(insert).size(), 1);
+            const quint64 renumbered = ink.strokesInInsert(insert).first().id;
+            QVERIFY(renumbered != collidingId);
+            // Перенумерация уже в файле, до каких-либо правок.
+            {
+                RawNote raw(note);
+                QCOMPARE(raw.column(QStringLiteral("SELECT id FROM insert_stroke")),
+                         QVariantList({qulonglong(renumbered)}));
+            }
+
+            // Удаление штриха страницы с тем же id не задевает штрих вкладыша.
+            store.attach(&ink);
+            ink.eraseStrokes({collidingId});
+            QVERIFY(store.flush());
+            // Новые штрихи не повторяют ни один из занятых id.
+            QVERIFY(ink.addStroke(lineOnPage(3)) > renumbered);
+            QVERIFY(store.flush());
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+        QCOMPARE(ink.allStrokes().size(), 2);
+        QCOMPARE(ink.strokesInInsert(insert).size(), 1);
+    }
+
+    // Задача 2.4, сценарий «Файл с вкладышами в версии без вкладышей».
+    void versionOneQuerySeesOnlyPageInk()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("aa.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.create(note, pdf));
+            store.attach(&ink);
+            ink.addStroke(lineOnPage(0));
+            ink.addStroke(lineOnPage(1));
+            const quint64 insert = ink.addInsert(0, QRectF(0, 0, 200, 140));
+            for (int i = 0; i < 3; ++i) {
+                Stroke stroke = lineOnPage(0, i * 10.0);
+                stroke.insert = insert;
+                ink.addStroke(stroke);
+            }
+            QVERIFY(store.flush());
+        }
+
+        RawNote raw(note);
+        const QVariantList pages = raw.column(
+            QStringLiteral("SELECT page FROM (SELECT id, page, tool, color, width, points "
+                           "FROM stroke ORDER BY id)"));
+        QCOMPARE(pages, QVariantList({0, 1}));
+    }
+
+    // Задача 2.6, сценарий «Вкладыш на исчезнувшей странице».
+    void keepsInsertsOnPagesThatNoLongerExist()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("ab.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        quint64 insert = 0;
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.create(note, pdf));
+            store.attach(&ink);
+            insert = ink.addInsert(12, QRectF(10, 10, 200, 140));
+            Stroke stroke = lineOnPage(0);
+            stroke.insert = insert;
+            ink.addStroke(stroke);
+            QVERIFY(store.flush());
+        }
+
+        // Документ из четырёх страниц вместо четырнадцати.
+        QFile::remove(pdf);
+        QVERIFY(QFile::copy(fixtures::noOutline(), pdf));
+
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.openNote(note));
+            QVERIFY(store.load(&ink));
+            QVERIFY(ink.hasInsert(insert));
+            QCOMPARE(ink.insertById(insert).page, 12);
+
+            store.attach(&ink);
+            ink.addStroke(lineOnPage(0));
+            ink.setInsertOpen(insert, false);
+            QVERIFY(store.flush());
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+        QVERIFY(ink.hasInsert(insert));
+        QCOMPARE(ink.strokesInInsert(insert).size(), 1);
+        QVERIFY(!ink.insertById(insert).open);
     }
 
 private:

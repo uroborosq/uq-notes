@@ -2,6 +2,9 @@
 build/
 build-*/
 
+# Local test documents and their notes
+testdata/
+
 # makepkg output
 packaging/src/
 packaging/pkg/

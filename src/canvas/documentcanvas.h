@@ -1,8 +1,11 @@
 #pragma once
 
+#include <QAbstractItemModel>
 #include <QHash>
 #include <QImage>
 #include <QPair>
+
+#include <functional>
 #include <QPointF>
 #include <QQmlEngine>
 #include <QElapsedTimer>
@@ -17,8 +20,11 @@
 #include "pdf/pdfdocumentmodel.h"
 #include "perf/framestats.h"
 
+class InsertListModel;
+class InsertSceneNode;
 class PageRenderService;
 class PageSceneNode;
+struct InkLayerNodes;
 
 // Холст документа. Страницы живут в графе сцены как узлы с текстурой; зум и
 // панорама - это матрица трансформации корневого узла, а не перерисовка
@@ -60,11 +66,15 @@ class DocumentCanvas : public QQuickItem
     Q_PROPERTY(bool stylusActive READ isStylusActive NOTIFY stylusActiveChanged)
     Q_PROPERTY(bool drawing READ isDrawing NOTIFY stylusActiveChanged)
     Q_PROPERTY(int inkGeometryPageCount READ inkGeometryPageCount NOTIFY texturesChanged)
+    // Вкладыши зоны удержания для элементов управления в QML.
+    Q_PROPERTY(QAbstractItemModel *insertModel READ insertModel CONSTANT)
 
 public:
     enum class Tool {
         Pen,
         Eraser,
+        // На одно касание: ставит вкладыш и возвращает прежний инструмент.
+        Insert,
     };
     Q_ENUM(Tool)
 
@@ -197,6 +207,37 @@ public:
     Q_INVOKABLE void endInk();
     Q_INVOKABLE void cancelInk();
 
+    // Вкладыши (design.md, D3-D6, D9). Раскрытие поднимает вкладыш наверх;
+    // сворачивание пустого вкладыша удаляет его обычным действием истории.
+    QAbstractItemModel *insertModel() const;
+    Q_INVOKABLE void openInsert(quint64 id);
+    Q_INVOKABLE void closeInsert(quint64 id);
+    Q_INVOKABLE void deleteInsert(quint64 id);
+    // Правый нижний угол рамки - в точку элемента, левый верхний на месте.
+    Q_INVOKABLE void resizeInsert(quint64 id, const QPointF &viewPoint);
+    // Верхний раскрытый вкладыш под точкой элемента; 0 - такого нет.
+    Q_INVOKABLE quint64 insertAtView(const QPointF &viewPoint) const;
+    // Рамка вкладыша в координатах документа.
+    Q_INVOKABLE QRectF insertDocumentRect(quint64 id) const;
+    // Порядок перекрытия снизу вверх.
+    QList<quint64> insertZOrder() const { return m_insertZOrder; }
+    static QSizeF defaultInsertSize() { return {kDefaultInsertWidth, kDefaultInsertHeight}; }
+    static QSizeF minInsertSize() { return {kMinInsertWidth, kMinInsertHeight}; }
+
+    // Сколько штрихов вкладыша уже переведены в готовую геометрию.
+    Q_INVOKABLE int insertGeometryStrokeCount(quint64 id) const;
+    // Где узел вкладыша стоит в графе сцены. «Поверх страниц» - слой
+    // вкладышей идёт после слоя страниц, а чернила вкладыша - под обрезкой.
+    enum class InsertLayering {
+        Missing = -1,   // узла вкладыша в графе сцены нет
+        BelowPages = 0, // слой вкладышей не последний
+        AbovePages = 1,
+        Unclipped = 2,  // чернила вкладыша вне узла обрезки
+    };
+    Q_ENUM(InsertLayering)
+    Q_INVOKABLE InsertLayering insertLayering(quint64 id) const;
+    Q_INVOKABLE int wetInsertCoveredVertexCount(quint64 id) const;
+
     // Масштабирование вокруг точки элемента: точка документа под ней остаётся
     // на месте - требование сценария pinch из canvas-view.
     Q_INVOKABLE void zoomAt(const QPointF &viewPoint, qreal newZoom);
@@ -257,6 +298,12 @@ private:
     // упирается в kMaxTextureEdge и весит 4096*4096*4 = 67 МБ, так что без
     // потолка расширенная зона на предельном масштабе съела бы под гигабайт.
     static constexpr qint64 kRasterMemoryBudget = qint64(600) * 1024 * 1024;
+    // Рамка нового вкладыша и минимальная: две строки рукописи и место под
+    // кнопки. В точках страницы (design.md, D3).
+    static constexpr qreal kDefaultInsertWidth = 200.0;
+    static constexpr qreal kDefaultInsertHeight = 140.0;
+    static constexpr qreal kMinInsertWidth = 48.0;
+    static constexpr qreal kMinInsertHeight = 36.0;
 
     struct PageEntry
     {
@@ -301,8 +348,19 @@ private:
     void onInkReloaded();
     void ensureInkGeometry(int page);
     void dropInkGeometry(int page);
-    bool updateDryInkNodes(PageSceneNode *node, bool budgetExhausted);
-    void updateWetInkNodes(PageSceneNode *node);
+    void placeInsertAt(const QPointF &viewPoint);
+    void raiseInsert(quint64 id);
+    QRectF insertDocRect(const InkInsert &insert) const;
+    // Точка элемента в координатах поверхности мокрого штриха.
+    QPointF surfacePoint(const QPointF &viewPoint) const;
+    void onInsertAdded(quint64 id);
+    void onInsertChanged(quint64 id);
+    void onInsertRemoved(quint64 id);
+    void onInsertInkChanged(quint64 id);
+    void ensureInsertGeometry(quint64 id);
+    void syncInsertGeometry();
+    void syncInsertModel();
+    void updateInsertNodes(int &inkRebuilds, bool &deferred);
     void clampOrigin();
     void updateCurrentPage();
     QSize targetPixelSize(int page) const;
@@ -355,6 +413,42 @@ private:
 
     QHash<int, QList<StrokeGeometry>> m_inkGeometry;
     QSet<int> m_inkDirtyPages;
+
+    QList<StrokeGeometry> tessellate(const QList<InkDocument::Record> &records) const;
+
+    // Куда включить узел чернил поверхности: у страницы - на место слоя, у
+    // вкладыша - под узел обрезки. Страница и вкладыш заливают чернила одним
+    // кодом (design.md, D4).
+    using AttachInkNode = std::function<void(QSGNode *child, bool wet)>;
+    bool updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry,
+                           bool budgetExhausted, const AttachInkNode &attach);
+    void updateWetInkNodes(InkLayerNodes &layer, bool active, const AttachInkNode &attach);
+
+    // Вкладыши. Инструмент до «Вкладыша» возвращается после установки.
+    Tool m_toolBeforeInsert = Tool::Pen;
+    // Касание инструментом «Вкладыш»: до отрыва пера оно ничего не рисует и
+    // не стирает, даже если инструмент уже вернулся к ластику.
+    bool m_placingInsert = false;
+    // Поверхность мокрого штриха: вкладыш (0 - страница) и начало его
+    // локальной системы в координатах страницы.
+    quint64 m_wetInsert = 0;
+    QPointF m_wetOrigin;
+    // Поверхность ластика, выбранная на касании: вкладыш или 0 - страница.
+    quint64 m_eraseInsert = 0;
+    // Порядок перекрытия снизу вверх: создание и раскрытие переносят в конец.
+    QList<quint64> m_insertZOrder;
+    // Геометрия чернил раскрытых вкладышей удерживаемых страниц.
+    QHash<quint64, QList<StrokeGeometry>> m_insertGeometry;
+    QSet<quint64> m_insertDirty;
+    // Страницы зоны удержания: по ним живут геометрия, узлы и модель вкладышей.
+    QSet<int> m_keepPages;
+    InsertListModel *m_insertModel = nullptr;
+
+    // Постоянные слои корня и узлы вкладышей. Трогаются только из
+    // updatePaintNode.
+    QSGNode *m_pagesRoot = nullptr;
+    QSGNode *m_insertsRoot = nullptr;
+    QHash<quint64, InsertSceneNode *> m_insertNodes;
 
     QHash<int, PageEntry> m_pages;
     qint64 m_rasterBudget = kRasterMemoryBudget;

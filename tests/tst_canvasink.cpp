@@ -646,7 +646,437 @@ private slots:
         QCOMPARE(ink.strokeCount(), 20);
     }
 
+    // --- Вкладыши (задачи 4.5, 5.1-5.5 add-ink-inserts) --------------------
+
+    // Задача 4.5: геометрия чернил вкладыша живёт по зоне удержания и только у
+    // раскрытого вкладыша.
+    void insertGeometryFollowsOpenStateAndRetention()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        QVERIFY(id != 0);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 0);
+
+        drawLine(&m_canvas, QPointF(420, 180), QPointF(520, 200));
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 1);
+
+        m_canvas.closeInsert(id);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 0);
+        m_canvas.openInsert(id);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 1);
+
+        m_canvas.goToPage(13);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 0);
+        m_canvas.goToPage(0);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 1);
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+    }
+
+    // Сценарий «Вкладыш в месте касания».
+    void insertToolPlacesOpenInsertAndRestoresTool()
+    {
+        m_canvas.goToPage(0);
+        const QPointF at(400, 150);
+        const int page = m_canvas.pageAtView(at);
+        QCOMPARE(page, 0);
+
+        m_canvas.setTool(DocumentCanvas::Tool::Eraser);
+        m_canvas.setTool(DocumentCanvas::Tool::Insert);
+        m_canvas.beginInkAt(at, 0.6, false);
+        // Инструмент уже вернулся к ластику, но касание до отрыва ничего не
+        // стирает и не рисует.
+        m_canvas.continueInkAt(at + QPointF(30, 20), 0.6);
+        m_canvas.endInk();
+
+        QCOMPARE(m_ink.insertCount(), 1);
+        const InkInsert insert = m_ink.allInserts().first();
+        QVERIFY(insert.open);
+        QCOMPARE(insert.page, page);
+        const QPointF expected = m_canvas.viewToPage(page, at);
+        QVERIFY(std::hypot(insert.rect.left() - expected.x(), insert.rect.top() - expected.y())
+                < 1e-6);
+        QCOMPARE(insert.rect.size(), DocumentCanvas::defaultInsertSize());
+        QCOMPARE(m_canvas.tool(), DocumentCanvas::Tool::Eraser);
+        QCOMPARE(m_ink.strokeCount(), 0);
+    }
+
+    // Сценарий «Касание мимо страницы».
+    void insertToolIgnoresGapBetweenPages()
+    {
+        m_canvas.setZoom(0.4);
+        const QRectF first = m_canvas.layout().pageRect(0);
+        const QPointF gap = m_canvas.documentToView(
+            QPointF(first.center().x(), first.bottom() + m_canvas.layout().rowSpacing() / 2));
+        QVERIFY(QRectF(0, 0, m_canvas.width(), m_canvas.height()).contains(gap));
+        QCOMPARE(m_canvas.pageAtView(gap), -1);
+
+        m_canvas.setTool(DocumentCanvas::Tool::Insert);
+        m_canvas.beginInkAt(gap, 0.6, false);
+        m_canvas.endInk();
+
+        QCOMPARE(m_ink.insertCount(), 0);
+        QCOMPARE(m_canvas.tool(), DocumentCanvas::Tool::Insert);
+    }
+
+    // Сценарий «Касание внутри раскрытого вкладыша».
+    void insertToolIgnoresOpenInsert()
+    {
+        m_canvas.goToPage(0);
+        QVERIFY(placeInsert(QPointF(400, 150)) != 0);
+
+        m_canvas.setTool(DocumentCanvas::Tool::Insert);
+        m_canvas.beginInkAt(QPointF(450, 200), 0.6, false);
+        m_canvas.endInk();
+
+        QCOMPARE(m_ink.insertCount(), 1);
+        QCOMPARE(m_canvas.tool(), DocumentCanvas::Tool::Insert);
+    }
+
+    // Сценарий «Касание пальцем».
+    void fingerNeverPlacesInsert()
+    {
+        m_canvas.goToPage(0);
+        m_canvas.setTool(DocumentCanvas::Tool::Insert);
+
+        const QEventPoint pressed(1, QEventPoint::State::Pressed, QPointF(450, 350),
+                                  QPointF(450, 350));
+        QTouchEvent begin(QEvent::TouchBegin, touchscreen(), Qt::NoModifier, {pressed});
+        QCoreApplication::sendEvent(&m_canvas, &begin);
+        const QEventPoint released(1, QEventPoint::State::Released, QPointF(450, 350),
+                                   QPointF(450, 350));
+        QTouchEvent end(QEvent::TouchEnd, touchscreen(), Qt::NoModifier, {released});
+        QCoreApplication::sendEvent(&m_canvas, &end);
+
+        QCOMPARE(m_ink.insertCount(), 0);
+        QCOMPARE(m_canvas.tool(), DocumentCanvas::Tool::Insert);
+    }
+
+    // Сценарий «Штрих внутри вкладыша».
+    void strokeInsideInsertBelongsToInsert()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        m_canvas.setPenWidth(1.6);
+        m_canvas.setPenColor(QColor(0xc0, 0x28, 0x28));
+
+        const QPointF from(420, 180);
+        drawLine(&m_canvas, from, QPointF(520, 200));
+
+        QVERIFY(m_ink.allStrokes().isEmpty());
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+        const Stroke &stroke = m_ink.strokesInInsert(id).first().stroke;
+        QCOMPARE(stroke.insert, id);
+        QCOMPARE(stroke.page, 0);
+        QVERIFY(qAbs(stroke.width - 1.6) < 1e-9);
+        QCOMPARE(stroke.color, QColor(0xc0, 0x28, 0x28));
+
+        // Точки - в локальных координатах вкладыша.
+        const QPointF expected = m_canvas.viewToPage(0, from) - m_ink.insertById(id).rect.topLeft();
+        const QPointF stored = stroke.points.first().position;
+        QVERIFY2(std::hypot(stored.x() - expected.x(), stored.y() - expected.y()) < 1.0,
+                 "штрих вкладыша записан не в его локальных координатах");
+    }
+
+    // Сценарий «Штрих выходит за край вкладыша».
+    void strokeLeavingInsertStaysInInsert()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 180), QPointF(650, 600));
+
+        QVERIFY(m_ink.allStrokes().isEmpty());
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+        const InkInsert insert = m_ink.insertById(id);
+        const QPointF last = m_ink.strokesInInsert(id).first().stroke.points.last().position;
+        QVERIFY(last.x() > insert.rect.width() || last.y() > insert.rect.height());
+    }
+
+    // Сценарий «Штрих страницы под вкладышем».
+    void pageStrokeThroughInsertStaysOnPage()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(300, 200), QPointF(650, 220));
+
+        QCOMPARE(m_ink.strokesOnPage(0).size(), 1);
+        QVERIFY(m_ink.strokesInInsert(id).isEmpty());
+    }
+
+    // Сценарий «Ластик во вкладыше».
+    void insertEraserKeepsPageInkBelow()
+    {
+        m_canvas.goToPage(0);
+        drawLine(&m_canvas, QPointF(420, 200), QPointF(520, 200)); // уйдёт под вкладыш
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 240), QPointF(520, 240));
+        QCOMPARE(m_ink.strokesOnPage(0).size(), 1);
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+
+        m_canvas.setTool(DocumentCanvas::Tool::Eraser);
+        drawLine(&m_canvas, QPointF(470, 195), QPointF(470, 250));
+
+        QVERIFY(m_ink.strokesInInsert(id).isEmpty());
+        QCOMPARE(m_ink.strokesOnPage(0).size(), 1);
+    }
+
+    // Сценарий «Ластик страницы заходит под вкладыш».
+    void pageEraserSkipsInsertAndCoveredInk()
+    {
+        m_canvas.goToPage(0);
+        drawLine(&m_canvas, QPointF(420, 200), QPointF(520, 200)); // закрыт вкладышем
+        const quint64 covered = m_ink.strokesOnPage(0).first().id;
+        drawLine(&m_canvas, QPointF(440, 120), QPointF(500, 120)); // виден, над рамкой
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 240), QPointF(520, 240));
+
+        m_canvas.setTool(DocumentCanvas::Tool::Eraser);
+        drawLine(&m_canvas, QPointF(470, 100), QPointF(470, 300));
+
+        QCOMPARE(m_ink.strokesOnPage(0).size(), 1);
+        QCOMPARE(m_ink.strokesOnPage(0).first().id, covered);
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+    }
+
+    // Сценарий «Перевёрнутое перо во вкладыше».
+    void invertedPenErasesInsideInsert()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 220), QPointF(520, 220));
+
+        // Перевёрнутый конец касается прямо штриха: через прямой вызов признак
+        // ластика действует в точке касания, как в
+        // invertedPenErasesAndRestoresPreviousTool.
+        drawLine(&m_canvas, QPointF(470, 215), QPointF(470, 225), 0.6, true);
+        QVERIFY(m_ink.strokesInInsert(id).isEmpty());
+
+        drawLine(&m_canvas, QPointF(420, 200), QPointF(520, 210));
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+        QVERIFY(m_ink.allStrokes().isEmpty());
+    }
+
+    // Сценарий «Увеличение вкладыша».
+    void resizeMovesOnlyBottomRightCorner()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 180), QPointF(520, 200));
+        const InkInsert before = m_ink.insertById(id);
+        const QList<InkPoint> points = m_ink.strokesInInsert(id).first().stroke.points;
+
+        const QRectF doc = m_canvas.insertDocumentRect(id);
+        m_canvas.resizeInsert(id, m_canvas.documentToView(doc.bottomRight() + QPointF(100, 60)));
+
+        const InkInsert after = m_ink.insertById(id);
+        QCOMPARE(after.rect.topLeft(), before.rect.topLeft());
+        QVERIFY(qAbs(after.rect.width() - (before.rect.width() + 100)) < 1e-6);
+        QVERIFY(qAbs(after.rect.height() - (before.rect.height() + 60)) < 1e-6);
+        const QList<InkPoint> moved = m_ink.strokesInInsert(id).first().stroke.points;
+        QCOMPARE(moved.size(), points.size());
+        for (int i = 0; i < points.size(); ++i)
+            QCOMPARE(moved[i].position, points[i].position);
+    }
+
+    // Сценарии «Скрытые чернила возвращаются» и «Предел уменьшения».
+    void shrinkingHidesButKeepsInk()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(410, 160), QPointF(550, 250));
+        const QRectF doc = m_canvas.insertDocumentRect(id);
+
+        m_canvas.resizeInsert(id, m_canvas.documentToView(doc.topLeft() + QPointF(60, 40)));
+        QCOMPARE(m_ink.insertById(id).rect.size(), QSizeF(60, 40));
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+
+        m_canvas.resizeInsert(id, m_canvas.documentToView(doc.bottomRight()));
+        QVERIFY(qAbs(m_ink.insertById(id).rect.width() - doc.width()) < 1e-6);
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 1);
+
+        m_canvas.resizeInsert(id, m_canvas.documentToView(doc.topLeft() - QPointF(10, 10)));
+        QCOMPARE(m_ink.insertById(id).rect.size(), DocumentCanvas::minInsertSize());
+        QCOMPARE(m_ink.insertById(id).rect.topLeft(), doc.topLeft()
+                                                          - m_canvas.layout().pageRect(0).topLeft());
+    }
+
+    // Сценарии «Свернуть вкладыш» и «Раскрыть вкладыш».
+    void collapseAndReopenKeepContent()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 180), QPointF(520, 200));
+        const QRectF rect = m_ink.insertById(id).rect;
+
+        m_canvas.closeInsert(id);
+        QVERIFY(m_ink.hasInsert(id));
+        QVERIFY(!m_ink.insertById(id).open);
+        // Свёрнутый вкладыш штрих не перехватывает: он идёт на страницу.
+        QCOMPARE(m_canvas.insertAtView(QPointF(450, 200)), quint64(0));
+
+        m_canvas.openInsert(id);
+        QVERIFY(m_ink.insertById(id).open);
+        QCOMPARE(m_ink.insertById(id).rect, rect);
+        drawLine(&m_canvas, QPointF(420, 220), QPointF(520, 230));
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 2);
+        QVERIFY(m_ink.allStrokes().isEmpty());
+    }
+
+    // Сценарий «Сворачивание пустого вкладыша».
+    void collapsingEmptyInsertRemovesIt()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        m_canvas.closeInsert(id);
+        QVERIFY(!m_ink.hasInsert(id));
+
+        // Отменяется как удаление: возвращается раскрытым.
+        m_ink.undo();
+        QVERIFY(m_ink.hasInsert(id));
+        QVERIFY(m_ink.insertById(id).open);
+        QCOMPARE(m_canvas.insertAtView(QPointF(450, 200)), id);
+    }
+
+    // Сценарий «Удаление и отмена».
+    void deletingInsertUndoesWithContent()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        drawLine(&m_canvas, QPointF(420, 180), QPointF(520, 200));
+        drawLine(&m_canvas, QPointF(420, 220), QPointF(520, 230));
+        const QRectF rect = m_ink.insertById(id).rect;
+
+        m_canvas.deleteInsert(id);
+        QVERIFY(!m_ink.hasInsert(id));
+        QCOMPARE(m_ink.strokeCount(), 0);
+        QCOMPARE(m_canvas.insertModel()->rowCount(), 0);
+
+        m_ink.undo();
+        QVERIFY(m_ink.hasInsert(id));
+        QCOMPARE(m_ink.insertById(id).rect, rect);
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 2);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 2);
+    }
+
+    // Сценарий «Масштаб вместе со страницей».
+    void insertScalesWithPage()
+    {
+        m_canvas.setZoom(1.0);
+        const QPointF at(450, 300);
+        QVERIFY(m_canvas.pageAtView(at) >= 0);
+        const quint64 id = placeInsert(at);
+        const QRectF doc = m_canvas.insertDocumentRect(id);
+        const QRectF before(m_canvas.documentToView(doc.topLeft()),
+                            m_canvas.documentToView(doc.bottomRight()));
+
+        m_canvas.zoomAt(before.center(), 2.0);
+        const QRectF after(m_canvas.documentToView(doc.topLeft()),
+                           m_canvas.documentToView(doc.bottomRight()));
+        QCOMPARE(m_canvas.insertDocumentRect(id), doc);
+        QVERIFY(qAbs(after.width() - 2.0 * before.width()) < 1e-6);
+        QVERIFY(qAbs(after.height() - 2.0 * before.height()) < 1e-6);
+        // Точка документа под центром зума осталась там же.
+        QVERIFY(std::hypot(after.center().x() - before.center().x(),
+                           after.center().y() - before.center().y())
+                < 1e-6);
+        QCOMPARE(m_canvas.insertAtView(before.center()), id);
+    }
+
+    // Сценарий «Переключение на разворот».
+    void insertSurvivesPageModeSwitch()
+    {
+        m_canvas.goToPage(3);
+        const QPointF at(450, 350);
+        const int page = m_canvas.pageAtView(at);
+        QVERIFY(page >= 0);
+        const quint64 id = placeInsert(at);
+        const QRectF rect = m_ink.insertById(id).rect;
+
+        for (const auto mode : {DocumentCanvas::PageMode::Spread, DocumentCanvas::PageMode::Single}) {
+            m_canvas.setPageMode(mode);
+            QCOMPARE(m_ink.insertById(id).rect, rect);
+            const QRectF doc = m_canvas.insertDocumentRect(id);
+            QCOMPARE(doc.topLeft() - m_canvas.layout().pageRect(page).topLeft(), rect.topLeft());
+
+            // Модель для QML отдаёт ту же рамку в координатах документа.
+            QAbstractItemModel *model = m_canvas.insertModel();
+            bool found = false;
+            for (int row = 0; row < model->rowCount(); ++row) {
+                const QModelIndex index = model->index(row, 0);
+                if (model->data(index, model->roleNames().key("insertId")).toULongLong() != id)
+                    continue;
+                QCOMPARE(model->data(index, model->roleNames().key("docRect")).toRectF(), doc);
+                found = true;
+            }
+            QVERIFY(found);
+        }
+    }
+
+    // Сценарий «Вкладыш у края страницы».
+    void insertOverhangingIntoRightPageTakesStrokes()
+    {
+        m_canvas.setPageMode(DocumentCanvas::PageMode::Spread);
+        m_canvas.setZoom(0.5);
+        const QList<int> pair = m_canvas.layout().pagesInRow(1);
+        QCOMPARE(pair.size(), 2);
+        m_canvas.goToPage(pair.first());
+        const QRectF left = m_canvas.layout().pageRect(pair.first());
+        const QRectF right = m_canvas.layout().pageRect(pair.last());
+
+        const quint64 id =
+            placeInsert(m_canvas.documentToView(QPointF(left.right() - 30, left.top() + 100)));
+        QVERIFY(id != 0);
+        QVERIFY(m_canvas.insertDocumentRect(id).right() > right.left() + 100);
+
+        const QPointF from = m_canvas.documentToView(QPointF(right.left() + 20, left.top() + 130));
+        const QPointF to = m_canvas.documentToView(QPointF(right.left() + 100, left.top() + 150));
+        QCOMPARE(m_canvas.pageAtView(from), pair.last());
+        QCOMPARE(m_canvas.insertAtView(from), id);
+        drawLine(&m_canvas, from, to);
+
+        QCOMPARE(m_ink.strokesInInsert(id).size(), 1);
+        QVERIFY(m_ink.strokesOnPage(pair.last()).isEmpty());
+        m_canvas.setPageMode(DocumentCanvas::PageMode::Single);
+    }
+
+    // Сценарий «Перекрывающиеся вкладыши».
+    void lastOpenedInsertIsOnTop()
+    {
+        m_canvas.goToPage(0);
+        const QPointF first(380, 150);
+        const quint64 a = placeInsert(first);
+        drawLine(&m_canvas, QPointF(390, 160), QPointF(420, 170)); // чтобы не удалился
+        m_canvas.closeInsert(a);
+        const quint64 b = placeInsert(first + QPointF(60, 50));
+        QVERIFY(a != 0 && b != 0 && a != b);
+
+        const QPointF overlap = first + QPointF(80, 70);
+        QCOMPARE(m_canvas.insertAtView(overlap), b);
+
+        m_canvas.openInsert(a);
+        QCOMPARE(m_canvas.insertAtView(overlap), a);
+        drawLine(&m_canvas, overlap, overlap + QPointF(20, 10));
+        QCOMPARE(m_ink.strokesInInsert(a).size(), 2);
+        QVERIFY(m_ink.strokesInInsert(b).isEmpty());
+
+        m_canvas.openInsert(b);
+        QCOMPARE(m_canvas.insertAtView(overlap), b);
+        QCOMPARE(m_canvas.insertZOrder(), QList<quint64>({a, b}));
+    }
+
 private:
+    // Ставит вкладыш касанием инструментом «Вкладыш» и возвращает его id.
+    quint64 placeInsert(const QPointF &viewPoint)
+    {
+        const int before = m_ink.insertCount();
+        m_canvas.setTool(DocumentCanvas::Tool::Insert);
+        m_canvas.beginInkAt(viewPoint, 0.6, false);
+        m_canvas.endInk();
+        if (m_ink.insertCount() != before + 1)
+            return 0;
+        return m_canvas.insertZOrder().constLast();
+    }
+
     PdfDocumentModel m_document;
     InkDocument m_ink;
     DocumentCanvas m_canvas;

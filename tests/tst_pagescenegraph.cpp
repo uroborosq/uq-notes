@@ -378,6 +378,63 @@ private slots:
         // Вытесняется геометрия, а не данные.
         QCOMPARE(fixture.ink.strokeCount(), 1);
     }
+
+    // Задача 4.6 add-ink-inserts: узел вкладыша стоит в слое поверх всех
+    // страниц, чернила - под обрезкой, мокрый штрих вкладыша покрыт узлами
+    // целиком и не рисуется на странице.
+    void insertNodeStaysAboveAllPages()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+
+        const QPointF at(380, 280);
+        QCOMPARE(canvas->pageAtView(at), 0);
+        canvas->setTool(DocumentCanvas::Tool::Insert);
+        canvas->beginInkAt(at, 0.6, false);
+        canvas->endInk();
+        QCOMPARE(fixture.ink.insertCount(), 1);
+        const quint64 id = fixture.ink.allInserts().first().id;
+
+        drawLine(canvas, QPointF(400, 300), QPointF(480, 320));
+        QCOMPARE(fixture.ink.strokesInInsert(id).size(), 1);
+        renderFrames(&fixture.window, 3);
+        QCOMPARE(canvas->insertLayering(id), DocumentCanvas::InsertLayering::AbovePages);
+
+        // Мокрый штрих во вкладыше.
+        const QPointF from(400, 340);
+        canvas->beginInkAt(from, 0.6, false);
+        for (int i = 1; i <= 24; ++i)
+            canvas->continueInkAt(from + QPointF(4.0 * i, 1.5 * i), 0.6);
+        renderFrames(&fixture.window, 1);
+        QVERIFY(canvas->wetStripVertexCount() >= 4);
+        QCOMPARE(canvas->wetInsertCoveredVertexCount(id), canvas->wetStripVertexCount());
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), -1);
+        QCOMPARE(canvas->insertLayering(id), DocumentCanvas::InsertLayering::AbovePages);
+        canvas->endInk();
+        renderFrames(&fixture.window, 2);
+        QCOMPARE(canvas->wetInsertCoveredVertexCount(id), -1);
+        QCOMPARE(fixture.ink.strokesInInsert(id).size(), 2);
+
+        // Соседние страницы, попавшие в граф сцены позже вкладыша, его не
+        // перекрывают.
+        canvas->panBy(QPointF(0, -300));
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return canvas->placeholderPageCount() == 0; }));
+        QCOMPARE(canvas->insertLayering(id), DocumentCanvas::InsertLayering::AbovePages);
+
+        // Свёрнутый вкладыш узла не имеет.
+        canvas->closeInsert(id);
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->insertLayering(id), DocumentCanvas::InsertLayering::Missing);
+        canvas->openInsert(id);
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->insertLayering(id), DocumentCanvas::InsertLayering::AbovePages);
+    }
 };
 
 // Графический бэкенд выбирается до создания приложения, поэтому QTEST_MAIN

@@ -13,6 +13,8 @@ qt_add_qml_module(uqnotes_core
         canvas/documentcanvas.h
         canvas/documentlayout.cpp
         canvas/documentlayout.h
+        canvas/insertlistmodel.cpp
+        canvas/insertlistmodel.h
         ink/inkdocument.cpp
         ink/inkdocument.h
         ink/inktypes.h

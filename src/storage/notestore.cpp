@@ -11,7 +11,10 @@
 
 namespace {
 
-constexpr int kSchemaVersion = 1;
+// Версия 2 добавила вкладыши. Их таблицы создаются через CREATE TABLE IF NOT
+// EXISTS, как и прежние, поэтому файл первой версии получает их при открытии
+// без отдельной миграции (design.md, D8).
+constexpr int kSchemaVersion = 2;
 // Автосохранение раз в пять секунд: спека разрешает терять не больше тридцати,
 // и запас нужен на то, чтобы одно пропущенное срабатывание ничего не стоило.
 constexpr int kDefaultAutosaveMs = 5000;
@@ -137,6 +140,12 @@ bool NoteStore::openNote(const QString &notePath)
     m_sourceSize = meta(QStringLiteral("source_size")).toLongLong();
     m_sourceHash = meta(QStringLiteral("source_hash"));
 
+    // Схема уже приведена к текущей версии в initializeSchema(); здесь это
+    // только отмечается. Версию ниже не опускаем: файл из будущей версии
+    // останется помеченным своей.
+    if (meta(QStringLiteral("schema")).toInt() < kSchemaVersion)
+        setMeta(QStringLiteral("schema"), QString::number(kSchemaVersion));
+
     m_autosave.start();
     emit stateChanged();
     return true;
@@ -182,6 +191,7 @@ void NoteStore::close()
     m_sourceSize = 0;
     m_sourceHash.clear();
     m_pendingStrokes.clear();
+    m_pendingInserts.clear();
     m_viewStateDirty = false;
     emit stateChanged();
 }
@@ -217,6 +227,26 @@ bool NoteStore::initializeSchema()
                        "  page_mode INTEGER NOT NULL,"
                        "  origin_x REAL NOT NULL,"
                        "  origin_y REAL NOT NULL)"),
+        // Вкладыши и их штрихи - в своих таблицах, а не колонкой в stroke:
+        // версия без вкладышей читает stroke целиком и иначе показала бы
+        // чернила вкладышей на странице в чужих координатах.
+        QStringLiteral("CREATE TABLE IF NOT EXISTS ink_insert ("
+                       "  id INTEGER PRIMARY KEY,"
+                       "  page INTEGER NOT NULL,"
+                       "  x REAL NOT NULL,"
+                       "  y REAL NOT NULL,"
+                       "  width REAL NOT NULL,"
+                       "  height REAL NOT NULL,"
+                       "  open INTEGER NOT NULL)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS insert_stroke ("
+                       "  id INTEGER PRIMARY KEY,"
+                       "  insert_id INTEGER NOT NULL,"
+                       "  tool INTEGER NOT NULL,"
+                       "  color INTEGER NOT NULL,"
+                       "  width REAL NOT NULL,"
+                       "  points BLOB NOT NULL)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS insert_stroke_insert "
+                       "ON insert_stroke(insert_id)"),
     };
     for (const QString &statement : statements) {
         if (!query.exec(statement)) {
@@ -229,16 +259,9 @@ bool NoteStore::initializeSchema()
 
 bool NoteStore::setMeta(const QString &key, const QString &value)
 {
-    QSqlQuery query(m_database);
-    query.prepare(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?) "
-                                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value"));
-    query.addBindValue(key);
-    query.addBindValue(value);
-    if (!query.exec()) {
-        m_errorString = query.lastError().text();
-        return false;
-    }
-    return true;
+    return exec(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?) "
+                               "ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+                {key, value});
 }
 
 QString NoteStore::meta(const QString &key) const
@@ -249,6 +272,19 @@ QString NoteStore::meta(const QString &key) const
     if (query.exec() && query.next())
         return query.value(0).toString();
     return QString();
+}
+
+bool NoteStore::exec(const QString &statement, const QVariantList &values)
+{
+    QSqlQuery query(m_database);
+    query.prepare(statement);
+    for (const QVariant &value : values)
+        query.addBindValue(value);
+    if (!query.exec()) {
+        m_errorString = query.lastError().text();
+        return false;
+    }
+    return true;
 }
 
 NoteStore::SourceState NoteStore::sourceState() const
@@ -295,14 +331,22 @@ void NoteStore::attach(InkDocument *ink)
     if (!m_ink)
         return;
 
-    // Пишем только дельту: отмечаем затронутые штрихи, а что с ними делать,
-    // решаем при сохранении.
-    const auto touch = [this](quint64 id, int) {
+    // Пишем только дельту: отмечаем затронутые штрихи и вкладыши, а что с ними
+    // делать, решаем при сохранении.
+    const auto touchStroke = [this](quint64 id, int) {
         m_pendingStrokes.insert(id);
         markDirty();
     };
-    connect(m_ink, &InkDocument::strokeAdded, this, touch);
-    connect(m_ink, &InkDocument::strokeRemoved, this, touch);
+    connect(m_ink, &InkDocument::strokeAdded, this, touchStroke);
+    connect(m_ink, &InkDocument::strokeRemoved, this, touchStroke);
+
+    const auto touchInsert = [this](quint64 id, int) {
+        m_pendingInserts.insert(id);
+        markDirty();
+    };
+    connect(m_ink, &InkDocument::insertAdded, this, touchInsert);
+    connect(m_ink, &InkDocument::insertChanged, this, touchInsert);
+    connect(m_ink, &InkDocument::insertRemoved, this, touchInsert);
 }
 
 void NoteStore::markDirty()
@@ -315,6 +359,14 @@ bool NoteStore::load(InkDocument *ink)
     if (!isOpen() || !ink)
         return false;
 
+    const auto readStroke = [](const QSqlQuery &query, InkDocument::Record *record) {
+        record->id = query.value(0).toULongLong();
+        record->stroke.tool = InkTool(query.value(2).toInt());
+        record->stroke.color = QColor::fromRgba(query.value(3).toUInt());
+        record->stroke.width = query.value(4).toReal();
+        record->stroke.points = unpackPoints(query.value(5).toByteArray());
+    };
+
     QSqlQuery query(m_database);
     if (!query.exec(QStringLiteral(
             "SELECT id, page, tool, color, width, points FROM stroke ORDER BY id"))) {
@@ -323,23 +375,93 @@ bool NoteStore::load(InkDocument *ink)
     }
 
     QList<InkDocument::Record> records;
+    QSet<quint64> pageStrokeIds;
     quint64 maxId = 0;
     while (query.next()) {
         InkDocument::Record record;
-        record.id = query.value(0).toULongLong();
+        readStroke(query, &record);
         record.stroke.page = query.value(1).toInt();
-        record.stroke.tool = InkTool(query.value(2).toInt());
-        record.stroke.color = QColor::fromRgba(query.value(3).toUInt());
-        record.stroke.width = query.value(4).toReal();
-        record.stroke.points = unpackPoints(query.value(5).toByteArray());
+        // Максимум считается и по пропущенным строкам: их id в таблице заняты.
+        maxId = qMax(maxId, record.id);
+        pageStrokeIds.insert(record.id);
         if (!record.stroke.isValid())
             continue;
-        maxId = qMax(maxId, record.id);
         records.append(record);
     }
 
-    ink->loadStrokes(records, maxId + 1);
+    QList<InkInsert> inserts;
+    quint64 maxInsertId = 0;
+    QSqlQuery insertQuery(m_database);
+    if (!insertQuery.exec(QStringLiteral(
+            "SELECT id, page, x, y, width, height, open FROM ink_insert ORDER BY id"))) {
+        m_errorString = insertQuery.lastError().text();
+        return false;
+    }
+    while (insertQuery.next()) {
+        InkInsert insert;
+        insert.id = insertQuery.value(0).toULongLong();
+        insert.page = insertQuery.value(1).toInt();
+        insert.rect = QRectF(insertQuery.value(2).toReal(), insertQuery.value(3).toReal(),
+                             insertQuery.value(4).toReal(), insertQuery.value(5).toReal());
+        insert.open = insertQuery.value(6).toBool();
+        maxInsertId = qMax(maxInsertId, insert.id);
+        if (insert.isValid())
+            inserts.append(insert);
+    }
+
+    QSqlQuery insertStrokeQuery(m_database);
+    if (!insertStrokeQuery.exec(QStringLiteral(
+            "SELECT id, insert_id, tool, color, width, points FROM insert_stroke ORDER BY id"))) {
+        m_errorString = insertStrokeQuery.lastError().text();
+        return false;
+    }
+    QList<InkDocument::Record> insertRecords;
+    while (insertStrokeQuery.next()) {
+        InkDocument::Record record;
+        readStroke(insertStrokeQuery, &record);
+        record.stroke.insert = insertStrokeQuery.value(1).toULongLong();
+        maxId = qMax(maxId, record.id);
+        if (record.stroke.insert == 0 || record.stroke.points.size() < 2)
+            continue;
+        insertRecords.append(record);
+    }
+
+    // Коллизия id. Версия без вкладышей раздаёт id штрихов от максимума таблицы
+    // stroke и может совпасть со штрихом вкладыша. Модели нужно одно
+    // пространство id, поэтому штрих вкладыша получает свободный id, и это
+    // пишется в файл сразу: пока перенумерация не записана, удаление штриха
+    // страницы с тем же id из обеих таблиц задело бы чужую строку (D8).
+    QList<QPair<quint64, quint64>> renames;
+    for (InkDocument::Record &record : insertRecords) {
+        if (!pageStrokeIds.contains(record.id))
+            continue;
+        const quint64 fresh = ++maxId;
+        renames.append({record.id, fresh});
+        record.id = fresh;
+    }
+    if (!renames.isEmpty()) {
+        if (!m_database.transaction()) {
+            m_errorString = m_database.lastError().text();
+            return false;
+        }
+        bool ok = true;
+        for (const auto &[from, to] : std::as_const(renames)) {
+            ok = exec(QStringLiteral("UPDATE insert_stroke SET id = ? WHERE id = ?"),
+                      {qulonglong(to), qulonglong(from)})
+                && ok;
+        }
+        if (!ok || !m_database.commit()) {
+            if (ok)
+                m_errorString = m_database.lastError().text();
+            m_database.rollback();
+            return false;
+        }
+    }
+
+    records.append(insertRecords);
+    ink->loadStrokes(records, maxId + 1, inserts, maxInsertId + 1);
     m_pendingStrokes.clear();
+    m_pendingInserts.clear();
 
     // Состояние просмотра читается сразу: оно нужно тому же открытию.
     QSqlQuery viewQuery(m_database);
@@ -370,22 +492,36 @@ bool NoteStore::load(InkDocument *ink)
 
 bool NoteStore::writeStroke(const InkDocument::Record &record)
 {
-    QSqlQuery query(m_database);
-    query.prepare(QStringLiteral(
-        "INSERT INTO stroke(id, page, tool, color, width, points) VALUES(?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(id) DO UPDATE SET page=excluded.page, tool=excluded.tool, "
-        "color=excluded.color, width=excluded.width, points=excluded.points"));
-    query.addBindValue(qulonglong(record.id));
-    query.addBindValue(record.stroke.page);
-    query.addBindValue(int(record.stroke.tool));
-    query.addBindValue(record.stroke.color.rgba());
-    query.addBindValue(record.stroke.width);
-    query.addBindValue(packPoints(record.stroke.points));
-    if (!query.exec()) {
-        m_errorString = query.lastError().text();
-        return false;
-    }
-    return true;
+    return exec(
+        QStringLiteral(
+            "INSERT INTO stroke(id, page, tool, color, width, points) VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET page=excluded.page, tool=excluded.tool, "
+            "color=excluded.color, width=excluded.width, points=excluded.points"),
+        {qulonglong(record.id), record.stroke.page, int(record.stroke.tool),
+         record.stroke.color.rgba(), record.stroke.width, packPoints(record.stroke.points)});
+}
+
+bool NoteStore::writeInsertStroke(const InkDocument::Record &record)
+{
+    return exec(
+        QStringLiteral("INSERT INTO insert_stroke(id, insert_id, tool, color, width, points) "
+                       "VALUES(?, ?, ?, ?, ?, ?) "
+                       "ON CONFLICT(id) DO UPDATE SET insert_id=excluded.insert_id, "
+                       "tool=excluded.tool, color=excluded.color, width=excluded.width, "
+                       "points=excluded.points"),
+        {qulonglong(record.id), qulonglong(record.stroke.insert), int(record.stroke.tool),
+         record.stroke.color.rgba(), record.stroke.width, packPoints(record.stroke.points)});
+}
+
+bool NoteStore::writeInsert(const InkInsert &insert)
+{
+    return exec(QStringLiteral("INSERT INTO ink_insert(id, page, x, y, width, height, open) "
+                               "VALUES(?, ?, ?, ?, ?, ?, ?) "
+                               "ON CONFLICT(id) DO UPDATE SET page=excluded.page, x=excluded.x, "
+                               "y=excluded.y, width=excluded.width, height=excluded.height, "
+                               "open=excluded.open"),
+                {qulonglong(insert.id), insert.page, insert.rect.x(), insert.rect.y(),
+                 insert.rect.width(), insert.rect.height(), insert.open ? 1 : 0});
 }
 
 bool NoteStore::flush()
@@ -403,25 +539,42 @@ bool NoteStore::flush()
     bool ok = true;
 
     if (m_ink && !m_pendingStrokes.isEmpty()) {
-        // Модель - источник истины: что в ней есть, то вписывается, чего нет -
-        // удаляется. Обход всех штрихов делается один раз на сохранение.
-        QHash<quint64, const InkDocument::Record *> index;
-        const QList<InkDocument::Record> all = m_ink->allStrokes();
-        for (const InkDocument::Record &record : all)
-            index.insert(record.id, &record);
+        // Модель - источник истины: что в ней есть, то вписывается в свою
+        // таблицу, чего нет - удаляется. Обход всех штрихов делается один раз
+        // на сохранение.
+        QHash<quint64, const InkDocument::Record *> pageIndex;
+        const QList<InkDocument::Record> pageStrokes = m_ink->allStrokes();
+        for (const InkDocument::Record &record : pageStrokes)
+            pageIndex.insert(record.id, &record);
+        QHash<quint64, const InkDocument::Record *> insertIndex;
+        const QList<InkDocument::Record> insertStrokes = m_ink->allInsertStrokes();
+        for (const InkDocument::Record &record : insertStrokes)
+            insertIndex.insert(record.id, &record);
 
         for (quint64 id : std::as_const(m_pendingStrokes)) {
-            const auto it = index.constFind(id);
-            if (it != index.constEnd()) {
+            if (const auto it = pageIndex.constFind(id); it != pageIndex.constEnd()) {
                 ok = writeStroke(**it) && ok;
-                continue;
+            } else if (const auto it = insertIndex.constFind(id); it != insertIndex.constEnd()) {
+                ok = writeInsertStroke(**it) && ok;
+            } else {
+                // Идентификаторы в обеих таблицах различны (load() это
+                // обеспечивает), поэтому удалять из обеих безопасно.
+                ok = exec(QStringLiteral("DELETE FROM stroke WHERE id = ?"), {qulonglong(id)})
+                    && ok;
+                ok = exec(QStringLiteral("DELETE FROM insert_stroke WHERE id = ?"),
+                          {qulonglong(id)})
+                    && ok;
             }
-            QSqlQuery query(m_database);
-            query.prepare(QStringLiteral("DELETE FROM stroke WHERE id = ?"));
-            query.addBindValue(qulonglong(id));
-            if (!query.exec()) {
-                m_errorString = query.lastError().text();
-                ok = false;
+        }
+    }
+
+    if (m_ink && !m_pendingInserts.isEmpty()) {
+        for (quint64 id : std::as_const(m_pendingInserts)) {
+            if (m_ink->hasInsert(id)) {
+                ok = writeInsert(m_ink->insertById(id)) && ok;
+            } else {
+                ok = exec(QStringLiteral("DELETE FROM ink_insert WHERE id = ?"), {qulonglong(id)})
+                    && ok;
             }
         }
     }
@@ -434,22 +587,15 @@ bool NoteStore::flush()
     }
 
     if (m_viewStateDirty) {
-        QSqlQuery query(m_database);
-        query.prepare(QStringLiteral(
-            "INSERT INTO view_state(id, page, zoom, page_mode, origin_x, origin_y) "
-            "VALUES(1, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET page=excluded.page, zoom=excluded.zoom, "
-            "page_mode=excluded.page_mode, origin_x=excluded.origin_x, "
-            "origin_y=excluded.origin_y"));
-        query.addBindValue(m_viewState.page);
-        query.addBindValue(m_viewState.zoom);
-        query.addBindValue(m_viewState.pageMode);
-        query.addBindValue(m_viewState.originX);
-        query.addBindValue(m_viewState.originY);
-        if (!query.exec()) {
-            m_errorString = query.lastError().text();
-            ok = false;
-        }
+        ok = exec(QStringLiteral(
+                      "INSERT INTO view_state(id, page, zoom, page_mode, origin_x, origin_y) "
+                      "VALUES(1, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(id) DO UPDATE SET page=excluded.page, zoom=excluded.zoom, "
+                      "page_mode=excluded.page_mode, origin_x=excluded.origin_x, "
+                      "origin_y=excluded.origin_y"),
+                  {m_viewState.page, m_viewState.zoom, m_viewState.pageMode,
+                   m_viewState.originX, m_viewState.originY})
+            && ok;
     }
 
     if (!m_database.commit()) {
@@ -459,6 +605,7 @@ bool NoteStore::flush()
     }
 
     m_pendingStrokes.clear();
+    m_pendingInserts.clear();
     m_viewStateDirty = false;
     m_toolDirty = false;
     emit dirtyChanged();

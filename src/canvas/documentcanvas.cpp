@@ -3,13 +3,16 @@
 #include <QQuickWindow>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <QSGClipNode>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometryNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGTransformNode>
 
+#include "canvas/insertlistmodel.h"
 #include "pdf/pagerenderservice.h"
 #include "pdf/pdfdocumentmodel.h"
 #include "perf/framestats.h"
@@ -29,6 +32,13 @@ constexpr qreal kFlickMaxSpeed = 6000.0;  // пикселей в секунду
 constexpr int kFlickIntervalMs = 4;
 
 inline QColor placeholderColor() { return QColor(238, 238, 240); }
+
+// Вкладыш - белый непрозрачный листок с тонкой границей постоянной экранной
+// толщины: на 25% граница в точках страницы исчезла бы, на 800% стала бы
+// полосой.
+inline QColor insertBackgroundColor() { return QColor(255, 255, 255); }
+inline QColor insertBorderColor() { return QColor(120, 124, 140); }
+constexpr qreal kInsertBorderPixels = 1.0;
 
 // Ограничение на размер текстуры страницы: при 800% страница A4 дала бы
 // 4760x6735 пикселей, что и в память не влезает, и не нужно.
@@ -55,6 +65,23 @@ constexpr int kMaxNodeRemovalsPerFrame = 1;
 constexpr qreal kMovingResolutionScale = 0.5;
 
 } // namespace
+
+// Чернила одной поверхности в графе сцены - страницы или вкладыша.
+struct InkLayerNodes
+{
+    // Сухие чернила: узел на штрих, чтобы у каждого был свой цвет.
+    QSGNode *dryInk = nullptr;
+    QList<quint64> dryInkIds;
+
+    // Мокрый штрих разложен на куски постоянного размера: заполненный кусок
+    // больше не трогается, а на кадр перезаливается только последний,
+    // незаполненный. Так объём работы на кадр не зависит от длины штриха.
+    QSGNode *wetInk = nullptr;
+    QList<QSGGeometryNode *> wetChunks;
+    // Длина окончательной части полосы мокрого штриха на прошлом кадре: до неё
+    // куски не перезаливаются.
+    int wetSettledCount = 0;
+};
 
 // Узел страницы: собственная система координат страницы, заполнитель под
 // текстурой и сама текстура. Индекс страницы хранится в узле, чтобы карта
@@ -95,30 +122,78 @@ public:
     QSGSimpleRectNode *placeholder = nullptr;
     QSGSimpleTextureNode *texture = nullptr;
 
-    // Сухие чернила: узел на штрих, чтобы у каждого был свой цвет.
-    QSGNode *dryInk = nullptr;
-    QList<quint64> dryInkIds;
-
-    // Мокрый штрих разложен на куски постоянного размера: заполненный кусок
-    // больше не трогается, а на кадр перезаливается только последний,
-    // незаполненный. Так объём работы на кадр не зависит от длины штриха.
-    QSGNode *wetInk = nullptr;
-    QList<QSGGeometryNode *> wetChunks;
-    // Длина окончательной части полосы мокрого штриха на прошлом кадре: до неё
-    // куски не перезаливаются.
-    int wetSettledCount = 0;
+    InkLayerNodes ink;
 
 private:
     Layer layerOf(const QSGNode *child) const
     {
         if (child == texture)
             return RasterLayer;
-        if (child == dryInk)
+        if (child == ink.dryInk)
             return DryInkLayer;
-        if (child == wetInk)
+        if (child == ink.wetInk)
             return WetInkLayer;
         return PlaceholderLayer; // заполнитель и всё неопознанное - в самый низ
     }
+};
+
+// Узел раскрытого вкладыша. Стоит в слое вкладышей поверх всех страниц, его
+// система координат - локальная система вкладыша: начало в левом верхнем углу
+// рамки, единица - точка страницы. Чернила лежат под узлом обрезки по рамке:
+// прямоугольная обрезка без поворота рисуется как scissor и лишнего прохода не
+// стоит (design.md, D4).
+class InsertSceneNode : public QSGTransformNode
+{
+public:
+    explicit InsertSceneNode(quint64 id)
+        : id(id)
+    {
+        background = new QSGSimpleRectNode(QRectF(), insertBackgroundColor());
+        appendChildNode(background);
+        for (QSGSimpleRectNode *&edge : border) {
+            edge = new QSGSimpleRectNode(QRectF(), insertBorderColor());
+            appendChildNode(edge);
+        }
+        clip = new QSGClipNode;
+        clip->setIsRectangular(true);
+        // Геометрия нужна обрезке на случай, когда рендер не сведёт её к
+        // scissor; прямоугольник совпадает с clipRect.
+        auto *geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 4);
+        clip->setGeometry(geometry);
+        clip->setFlag(QSGNode::OwnsGeometry, true);
+        appendChildNode(clip);
+    }
+
+    // Размер рамки и толщина границы - в точках страницы. Граница лежит
+    // снаружи рамки и не отнимает места под письмо.
+    void setFrame(const QSizeF &size, qreal borderWidth)
+    {
+        if (size == m_size && qFuzzyCompare(borderWidth, m_borderWidth))
+            return;
+        m_size = size;
+        m_borderWidth = borderWidth;
+
+        const QRectF local(QPointF(0, 0), size);
+        const qreal b = borderWidth;
+        background->setRect(local);
+        border[0]->setRect(QRectF(-b, -b, size.width() + 2 * b, b));
+        border[1]->setRect(QRectF(-b, size.height(), size.width() + 2 * b, b));
+        border[2]->setRect(QRectF(-b, 0, b, size.height()));
+        border[3]->setRect(QRectF(size.width(), 0, b, size.height()));
+        QSGGeometry::updateRectGeometry(clip->geometry(), local);
+        clip->setClipRect(local);
+        clip->markDirty(QSGNode::DirtyGeometry);
+    }
+
+    quint64 id = 0;
+    QSGSimpleRectNode *background = nullptr;
+    std::array<QSGSimpleRectNode *, 4> border{};
+    QSGClipNode *clip = nullptr;
+    InkLayerNodes ink;
+
+private:
+    QSizeF m_size;
+    qreal m_borderWidth = -1.0;
 };
 
 namespace {
@@ -180,6 +255,7 @@ qreal inputTimeSeconds(qreal timeSeconds)
 DocumentCanvas::DocumentCanvas(QQuickItem *parent)
     : QQuickItem(parent)
     , m_renderer(new PageRenderService(this))
+    , m_insertModel(new InsertListModel(this))
 {
     setFlag(ItemHasContents, true);
     setClip(true);
@@ -255,17 +331,33 @@ int DocumentCanvas::inkGeometryStrokeCount(int page) const
     return int(m_inkGeometry.value(page).size());
 }
 
+namespace {
+
+// Докуда куски мокрого штриха покрывают полосу, в вершинах; -1 - узла нет.
+int wetCoveredVertexCount(const InkLayerNodes &layer)
+{
+    if (!layer.wetInk)
+        return -1;
+    int covered = 0;
+    for (int index = 0; index < layer.wetChunks.size(); ++index) {
+        covered = qMax(covered,
+                       wetChunkStart(index) + layer.wetChunks[index]->geometry()->vertexCount());
+    }
+    return covered;
+}
+
+} // namespace
+
 int DocumentCanvas::wetInkCoveredVertexCount(int page) const
 {
     PageSceneNode *node = m_nodes.value(page);
-    if (!node || !node->wetInk)
-        return -1;
-    int covered = 0;
-    for (int index = 0; index < node->wetChunks.size(); ++index) {
-        covered = qMax(covered,
-                       wetChunkStart(index) + node->wetChunks[index]->geometry()->vertexCount());
-    }
-    return covered;
+    return node ? wetCoveredVertexCount(node->ink) : -1;
+}
+
+int DocumentCanvas::wetInsertCoveredVertexCount(quint64 id) const
+{
+    InsertSceneNode *node = m_insertNodes.value(id);
+    return node ? wetCoveredVertexCount(node->ink) : -1;
 }
 
 // Порядок детей узла страницы - это и есть порядок отрисовки, поэтому вопрос
@@ -275,7 +367,7 @@ int DocumentCanvas::wetInkCoveredVertexCount(int page) const
 DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
 {
     PageSceneNode *node = m_nodes.value(page);
-    if (!node || !node->texture || (!node->dryInk && !node->wetInk))
+    if (!node || !node->texture || (!node->ink.dryInk && !node->ink.wetInk))
         return InkLayering::Incomplete;
 
     bool rasterSeen = false;
@@ -283,18 +375,35 @@ DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
     for (QSGNode *child = node->firstChild(); child; child = child->nextSibling()) {
         if (child == node->texture) {
             rasterSeen = true;
-        } else if (child == node->dryInk) {
+        } else if (child == node->ink.dryInk) {
             if (!rasterSeen)
                 return InkLayering::BelowRaster;
             dryInkSeen = true;
-        } else if (child == node->wetInk) {
+        } else if (child == node->ink.wetInk) {
             if (!rasterSeen)
                 return InkLayering::BelowRaster;
-            if (node->dryInk && !dryInkSeen)
+            if (node->ink.dryInk && !dryInkSeen)
                 return InkLayering::BelowRaster; // мокрый штрих ушёл под сухие чернила
         }
     }
     return InkLayering::AboveRaster;
+}
+
+// Вкладыш виден поверх страниц, когда его узел - в слое вкладышей, этот слой
+// идёт последним ребёнком корня после слоя страниц, а чернила вкладыша лежат
+// под узлом обрезки.
+DocumentCanvas::InsertLayering DocumentCanvas::insertLayering(quint64 id) const
+{
+    InsertSceneNode *node = m_insertNodes.value(id);
+    if (!node || !m_insertsRoot || !m_pagesRoot || node->parent() != m_insertsRoot)
+        return InsertLayering::Missing;
+    if (m_pagesRoot->nextSibling() != m_insertsRoot || m_insertsRoot->nextSibling())
+        return InsertLayering::BelowPages;
+    for (const QSGNode *layer : {node->ink.dryInk, node->ink.wetInk}) {
+        if (layer && layer->parent() != node->clip)
+            return InsertLayering::Unclipped;
+    }
+    return InsertLayering::AbovePages;
 }
 
 int DocumentCanvas::pendingNodeRemovalCount() const
@@ -685,8 +794,12 @@ void DocumentCanvas::evictOverBudget()
 
 void DocumentCanvas::updateVisiblePages()
 {
-    if (m_layout.isEmpty())
+    if (m_layout.isEmpty()) {
+        m_keepPages.clear();
+        syncInsertGeometry();
+        syncInsertModel();
         return;
+    }
 
     const QRectF visible = visibleDocumentRect();
     m_visiblePages = m_layout.pagesIntersecting(visible);
@@ -734,6 +847,13 @@ void DocumentCanvas::updateVisiblePages()
     }
     for (int page : keep)
         ensureInkGeometry(page);
+
+    // Вкладыши живут по той же зоне удержания. Модель при этом меняется только
+    // вместе с составом зоны: на обычном кадре зума и панорамы строки те же, и
+    // сигналов нет.
+    m_keepPages = keepSet;
+    syncInsertGeometry();
+    syncInsertModel();
 
     requestRenders(false);
     updateCurrentPage();
@@ -819,6 +939,9 @@ void DocumentCanvas::geometryChange(const QRectF &newGeometry, const QRectF &old
     if (newGeometry.size() == oldGeometry.size())
         return;
 
+    const QPointF origin = m_origin;
+    const qreal zoom = m_zoom;
+
     if (oldGeometry.isEmpty() && !m_layout.isEmpty())
         fitPage(0);
     else
@@ -827,6 +950,12 @@ void DocumentCanvas::geometryChange(const QRectF &newGeometry, const QRectF &old
     updateVisiblePages();
     m_lodTimer.start();
     update();
+
+    // Смена размера двигает начало координат вида: у свойств originX/originY
+    // это обязано отражаться в уведомлении, иначе элементы управления
+    // вкладышами, привязанные к ним в QML, отстанут от графа сцены.
+    if (m_origin != origin || !qFuzzyCompare(m_zoom, zoom))
+        emit viewChanged();
 }
 
 void DocumentCanvas::releaseResources()
@@ -836,6 +965,9 @@ void DocumentCanvas::releaseResources()
     // из очереди тоже нечего - текстур, на которые она ссылается, больше нет.
     m_nodes.clear();
     m_droppedPages.clear();
+    m_insertNodes.clear();
+    m_pagesRoot = nullptr;
+    m_insertsRoot = nullptr;
     invalidateTextures();
     QQuickItem::releaseResources();
 }
@@ -859,6 +991,21 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         root = new QSGTransformNode;
         m_nodes.clear();
         m_droppedPages.clear();
+        // Два постоянных слоя: страницы и поверх них вкладыши. Так вкладыш
+        // рисуется поверх любой страницы, в каком бы порядке страницы ни
+        // попадали в граф сцены (design.md, D4).
+        //
+        // Слои - узлы преобразования с единичной матрицей, а не простые
+        // QSGNode. Программный рендер берёт преобразование и обрезку для
+        // добавленного узла из состояния его родителя, а состояние запоминает
+        // только у узлов преобразования, обрезки и прозрачности: страница,
+        // добавленная под простой узел кадром позже, рисовалась бы без масштаба
+        // и сдвига холста.
+        m_pagesRoot = new QSGTransformNode;
+        m_insertsRoot = new QSGTransformNode;
+        root->appendChildNode(m_pagesRoot);
+        root->appendChildNode(m_insertsRoot);
+        m_insertNodes.clear();
     }
 
     // Зум и панорама - только матрица корневого узла. Содержимое дочерних узлов
@@ -877,7 +1024,7 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             break;
         }
         if (PageSceneNode *node = m_nodes.take(it.key())) {
-            root->removeChildNode(node);
+            m_pagesRoot->removeChildNode(node);
             delete node;
             ++removals;
         }
@@ -906,7 +1053,7 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         PageSceneNode *node = m_nodes.value(page);
         if (!node) {
             node = new PageSceneNode(page);
-            root->appendChildNode(node);
+            m_pagesRoot->appendChildNode(node);
             m_nodes.insert(page, node);
         }
 
@@ -958,12 +1105,20 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         if (node->texture)
             node->texture->setRect(local);
 
-        if (updateDryInkNodes(node, inkRebuilds >= kMaxInkRebuildsPerFrame))
+        const AttachInkNode attach = [node](QSGNode *child, bool wet) {
+            node->addToLayer(child, wet ? PageSceneNode::WetInkLayer : PageSceneNode::DryInkLayer);
+        };
+        if (updateDryInkNodes(node->ink, m_inkGeometry.value(page),
+                              inkRebuilds >= kMaxInkRebuildsPerFrame, attach))
             ++inkRebuilds;
         else if (inkRebuilds >= kMaxInkRebuildsPerFrame)
             deferred = true;
-        updateWetInkNodes(node);
+        // Мокрый штрих вкладыша рисуется во вкладыше, а не на его странице.
+        updateWetInkNodes(node->ink, m_wet.isActive() && m_wetPage == page && m_wetInsert == 0,
+                          attach);
     }
+
+    updateInsertNodes(inkRebuilds, deferred);
 
     // Что не поместилось в этот кадр, доедет следующим.
     if (deferred)
@@ -975,85 +1130,84 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
 // Сухие чернила пересобираются только когда состав штрихов на странице
 // изменился: обычная прокрутка и зум их не трогают вовсе.
 // Возвращает true, если пересборка действительно случилась.
-bool DocumentCanvas::updateDryInkNodes(PageSceneNode *node, bool budgetExhausted)
+bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry,
+                                       bool budgetExhausted, const AttachInkNode &attach)
 {
-    const QList<StrokeGeometry> geometry = m_inkGeometry.value(node->page);
-
     QList<quint64> ids;
     ids.reserve(geometry.size());
     for (const StrokeGeometry &entry : geometry)
         ids.append(entry.id);
 
-    if (ids == node->dryInkIds)
+    if (ids == layer.dryInkIds)
         return false;
     if (budgetExhausted)
         return false;
 
-    if (node->dryInk) {
-        node->removeChildNode(node->dryInk);
-        delete node->dryInk;
-        node->dryInk = nullptr;
+    if (layer.dryInk) {
+        layer.dryInk->parent()->removeChildNode(layer.dryInk);
+        delete layer.dryInk;
+        layer.dryInk = nullptr;
     }
 
-    node->dryInkIds = ids;
+    layer.dryInkIds = ids;
     if (geometry.isEmpty())
         return true;
 
-    node->dryInk = new QSGNode;
-    node->addToLayer(node->dryInk, PageSceneNode::DryInkLayer);
+    layer.dryInk = new QSGNode;
+    attach(layer.dryInk, false);
     for (const StrokeGeometry &entry : geometry) {
         QSGGeometryNode *strokeNode = makeStripNode(entry.color);
         uploadStrip(strokeNode, entry.strip.constData(), entry.strip.size());
-        node->dryInk->appendChildNode(strokeNode);
+        layer.dryInk->appendChildNode(strokeNode);
     }
     return true;
 }
 
-void DocumentCanvas::updateWetInkNodes(PageSceneNode *node)
+void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
+                                       const AttachInkNode &attach)
 {
-    const bool active = m_wet.isActive() && m_wetPage == node->page;
     const QVector<StrokeTessellator::Vertex> &strip = m_wet.strip();
 
     if (!active || strip.size() < 4) {
-        if (node->wetInk) {
-            node->removeChildNode(node->wetInk);
-            delete node->wetInk;
-            node->wetInk = nullptr;
-            node->wetChunks.clear();
-            node->wetSettledCount = 0;
+        if (layer.wetInk) {
+            layer.wetInk->parent()->removeChildNode(layer.wetInk);
+            delete layer.wetInk;
+            layer.wetInk = nullptr;
+            layer.wetChunks.clear();
+            layer.wetSettledCount = 0;
         }
         return;
     }
 
-    if (!node->wetInk) {
-        node->wetInk = new QSGNode;
-        node->addToLayer(node->wetInk, PageSceneNode::WetInkLayer);
-        node->wetChunks.clear();
-        node->wetSettledCount = 0;
+    if (!layer.wetInk) {
+        layer.wetInk = new QSGNode;
+        attach(layer.wetInk, true);
+        layer.wetChunks.clear();
+        layer.wetSettledCount = 0;
     }
 
     const int needed =
         qMax(1, (strip.size() - kWetChunkOverlap + kWetChunkVertices - kWetChunkOverlap - 1)
                     / (kWetChunkVertices - kWetChunkOverlap));
 
-    while (node->wetChunks.size() < needed) {
+    while (layer.wetChunks.size() < needed) {
         QSGGeometryNode *chunk = makeStripNode(m_penColor);
-        node->wetInk->appendChildNode(chunk);
-        node->wetChunks.append(chunk);
+        layer.wetInk->appendChildNode(chunk);
+        layer.wetChunks.append(chunk);
     }
     // Полоса мокрого штриха может укоротиться: провизорный хвост пересобирается
     // на каждом отсчёте. Куски за её концом снимаются, а не остаются рисовать
     // прошлую геометрию.
-    while (node->wetChunks.size() > needed) {
-        QSGGeometryNode *chunk = node->wetChunks.takeLast();
-        node->wetInk->removeChildNode(chunk);
+    while (layer.wetChunks.size() > needed) {
+        QSGGeometryNode *chunk = layer.wetChunks.takeLast();
+        layer.wetInk->removeChildNode(chunk);
         delete chunk;
     }
 
     // Перезаливается всё, начиная с куска, где на прошлом кадре кончалась
     // окончательная часть полосы: до неё вершины не меняются никогда, а после
     // неё мог смениться весь провизорный хвост (design.md, D5).
-    const int firstChanged = qMin(node->wetSettledCount, int(strip.size()));
+    const int firstChanged = qMin(layer.wetSettledCount, int(strip.size()));
     const int firstDirty =
         qMax(0, (firstChanged - kWetChunkOverlap) / (kWetChunkVertices - kWetChunkOverlap));
     for (int index = firstDirty; index < needed; ++index) {
@@ -1061,9 +1215,79 @@ void DocumentCanvas::updateWetInkNodes(PageSceneNode *node)
         // Кусок с номером меньше needed всегда начинается раньше двух последних
         // вершин полосы, так что в нём не меньше трёх вершин - один треугольник.
         const int count = qMin(kWetChunkVertices, int(strip.size()) - start);
-        uploadStrip(node->wetChunks[index], strip.constData() + start, count);
+        uploadStrip(layer.wetChunks[index], strip.constData() + start, count);
     }
-    node->wetSettledCount = m_wet.settledVertexCount();
+    layer.wetSettledCount = m_wet.settledVertexCount();
+}
+
+// Узлы вкладышей: только у раскрытых вкладышей удерживаемых страниц, в порядке
+// перекрытия. Узел вкладыша текстур не держит, поэтому снимается сразу, без
+// растягивания по кадрам, как у страниц.
+void DocumentCanvas::updateInsertNodes(int &inkRebuilds, bool &deferred)
+{
+    if (!m_insertsRoot)
+        return;
+
+    const qreal borderWidth = qFuzzyIsNull(m_zoom) ? 1.0 : kInsertBorderPixels / m_zoom;
+    QSet<quint64> alive;
+    QSGNode *previous = nullptr;
+
+    for (quint64 id : std::as_const(m_insertZOrder)) {
+        const InkInsert insert = m_ink ? m_ink->insertById(id) : InkInsert();
+        if (!insert.open || !m_keepPages.contains(insert.page))
+            continue;
+        const QRectF rect = insertDocRect(insert);
+        if (rect.isEmpty())
+            continue;
+
+        InsertSceneNode *node = m_insertNodes.value(id);
+        if (!node) {
+            node = new InsertSceneNode(id);
+            m_insertNodes.insert(id, node);
+        }
+        // Порядок детей слоя вкладышей - порядок перекрытия.
+        if (node->parent() && node->previousSibling() != previous) {
+            node->parent()->removeChildNode(node);
+        }
+        if (!node->parent()) {
+            if (previous)
+                m_insertsRoot->insertChildNodeAfter(node, previous);
+            else
+                m_insertsRoot->prependChildNode(node);
+        }
+        previous = node;
+
+        QMatrix4x4 matrix;
+        matrix.translate(float(rect.x()), float(rect.y()));
+        node->setMatrix(matrix);
+        node->setFrame(rect.size(), borderWidth);
+
+        const AttachInkNode attach = [node](QSGNode *child, bool wet) {
+            // Сухие чернила - под мокрым штрихом, как на странице.
+            if (!wet && node->ink.wetInk)
+                node->clip->insertChildNodeBefore(child, node->ink.wetInk);
+            else
+                node->clip->appendChildNode(child);
+        };
+        if (updateDryInkNodes(node->ink, m_insertGeometry.value(id),
+                              inkRebuilds >= kMaxInkRebuildsPerFrame, attach))
+            ++inkRebuilds;
+        else if (inkRebuilds >= kMaxInkRebuildsPerFrame)
+            deferred = true;
+        updateWetInkNodes(node->ink, m_wet.isActive() && m_wetInsert == id, attach);
+        alive.insert(id);
+    }
+
+    for (auto it = m_insertNodes.begin(); it != m_insertNodes.end();) {
+        if (alive.contains(it.key())) {
+            ++it;
+            continue;
+        }
+        if (QSGNode *parent = it.value()->parent())
+            parent->removeChildNode(it.value());
+        delete it.value();
+        it = m_insertNodes.erase(it);
+    }
 }
 
 // --- Чернила -----------------------------------------------------------------
@@ -1078,10 +1302,22 @@ void DocumentCanvas::setInk(InkDocument *ink)
     m_ink = ink;
     m_inkGeometry.clear();
     m_inkDirtyPages.clear();
+    m_insertGeometry.clear();
+    m_insertDirty.clear();
+    m_insertZOrder.clear();
 
     if (m_ink) {
         connect(m_ink, &InkDocument::pageChanged, this, &DocumentCanvas::onInkPageChanged);
         connect(m_ink, &InkDocument::reloaded, this, &DocumentCanvas::onInkReloaded);
+        connect(m_ink, &InkDocument::insertAdded, this,
+                [this](quint64 id, int) { onInsertAdded(id); });
+        connect(m_ink, &InkDocument::insertChanged, this,
+                [this](quint64 id, int) { onInsertChanged(id); });
+        connect(m_ink, &InkDocument::insertRemoved, this,
+                [this](quint64 id, int) { onInsertRemoved(id); });
+        connect(m_ink, &InkDocument::insertInkChanged, this, &DocumentCanvas::onInsertInkChanged);
+        for (const InkInsert &insert : m_ink->allInserts())
+            m_insertZOrder.append(insert.id);
     }
 
     updateVisiblePages();
@@ -1093,6 +1329,10 @@ void DocumentCanvas::setTool(Tool tool)
 {
     if (m_tool == tool)
         return;
+    // «Вкладыш» - инструмент на одно касание: после установки вкладыша
+    // возвращается тот, что был выбран до него.
+    if (tool == Tool::Insert)
+        m_toolBeforeInsert = m_tool;
     m_tool = tool;
     emit toolChanged();
 }
@@ -1153,11 +1393,25 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
 
     if (eraser || m_tool == Tool::Eraser) {
         m_erasedInCurrentStroke.clear();
+        // Поверхность ластика выбирается на касании и не меняется до отрыва:
+        // начатый во вкладыше стирает только вкладыш, начатый на странице -
+        // только страницу (design.md, D3).
+        m_eraseInsert = insertAtView(viewPoint);
         eraseAt(viewPoint);
         return true;
     }
 
-    const int page = m_layout.pageAt(viewToDocument(viewPoint));
+    if (m_tool == Tool::Insert) {
+        m_placingInsert = true;
+        placeInsertAt(viewPoint);
+        return true;
+    }
+
+    // Штрих, начатый в раскрытом вкладыше, принадлежит вкладышу целиком, даже
+    // если перо потом уйдёт за рамку.
+    const quint64 insert = insertAtView(viewPoint);
+    const int page = insert != 0 ? m_ink->insertById(insert).page
+                                 : m_layout.pageAt(viewToDocument(viewPoint));
     if (page < 0)
         return false; // касание в промежутке между страницами не рисует
 
@@ -1165,13 +1419,17 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
     prototype.tool = InkTool::Pen;
     prototype.color = m_penColor;
     prototype.width = m_penWidth;
+    prototype.insert = insert;
 
     m_wetPage = page;
+    m_wetInsert = insert;
+    m_wetOrigin = insert != 0 ? m_ink->insertById(insert).rect.topLeft() : QPointF();
     // Масштаб фиксируется на начало штриха: пока перо в контакте, жесты не
     // начинаются, поэтому внутри штриха он не меняется.
     m_wet.begin(page, prototype, m_zoom);
-    // Чернила складываются в координатах страницы, а не экрана.
-    m_wet.addPoint({viewToPage(page, viewPoint), pressure, inputTimeSeconds(timeSeconds)});
+    // Чернила складываются в координатах поверхности - страницы или вкладыша,
+    // а не экрана.
+    m_wet.addPoint({surfacePoint(viewPoint), pressure, inputTimeSeconds(timeSeconds)});
 
     if (m_frameStats)
         m_frameStats->markInput();
@@ -1184,13 +1442,15 @@ void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure, qre
 {
     // Начатый штрих доводится до конца тем же инструментом: нажатие кнопки на
     // корпусе посреди линии не должно превращать её в стирание.
+    if (m_placingInsert)
+        return;
     if (!m_wet.isActive()) {
         if ((m_pointerIsEraser || m_tool == Tool::Eraser) && m_stylusInContact)
             eraseAt(viewPoint);
         return;
     }
 
-    m_wet.addPoint({viewToPage(m_wetPage, viewPoint), pressure, inputTimeSeconds(timeSeconds)});
+    m_wet.addPoint({surfacePoint(viewPoint), pressure, inputTimeSeconds(timeSeconds)});
 
     if (m_frameStats)
         m_frameStats->markInput();
@@ -1200,6 +1460,7 @@ void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure, qre
 void DocumentCanvas::endInk()
 {
     setStylusInContact(false);
+    m_placingInsert = false;
 
     if (!m_erasedInCurrentStroke.isEmpty()) {
         m_erasedInCurrentStroke.clear();
@@ -1212,6 +1473,8 @@ void DocumentCanvas::endInk()
     const Stroke stroke = m_wet.finish();
     const int page = m_wetPage;
     m_wetPage = -1;
+    m_wetInsert = 0;
+    m_wetOrigin = QPointF();
     m_wet.reset();
 
     if (m_ink && stroke.isValid())
@@ -1227,6 +1490,9 @@ void DocumentCanvas::cancelInk()
     setStylusInContact(false);
     m_wet.reset();
     m_wetPage = -1;
+    m_wetInsert = 0;
+    m_wetOrigin = QPointF();
+    m_placingInsert = false;
     m_erasedInCurrentStroke.clear();
     update();
     emit stylusActiveChanged();
@@ -1236,13 +1502,27 @@ void DocumentCanvas::eraseAt(const QPointF &viewPoint)
 {
     if (!m_ink)
         return;
-    const QPointF documentPoint = viewToDocument(viewPoint);
-    const int page = m_layout.pageAt(documentPoint);
-    if (page < 0)
-        return;
 
-    const QList<quint64> hits =
-        m_ink->strokesNear(page, viewToPage(page, viewPoint), m_eraserRadius);
+    QList<quint64> hits;
+    if (m_eraseInsert != 0) {
+        // Во вкладыше стирается только видимое: точка в его рамке и не закрыта
+        // вкладышем поверх. Скрытое обрезкой вслепую не стирается.
+        if (insertAtView(viewPoint) != m_eraseInsert)
+            return;
+        const QPointF local =
+            viewToDocument(viewPoint) - insertDocumentRect(m_eraseInsert).topLeft();
+        hits = m_ink->strokesNearInInsert(m_eraseInsert, local, m_eraserRadius);
+    } else {
+        // Под раскрытым вкладышем чернила страницы не видны, и исчезнуть
+        // невидимое не должно.
+        if (insertAtView(viewPoint) != 0)
+            return;
+        const QPointF documentPoint = viewToDocument(viewPoint);
+        const int page = m_layout.pageAt(documentPoint);
+        if (page < 0)
+            return;
+        hits = m_ink->strokesNear(page, viewToPage(page, viewPoint), m_eraserRadius);
+    }
     QList<quint64> fresh;
     for (quint64 id : hits) {
         if (!m_erasedInCurrentStroke.contains(id)) {
@@ -1286,6 +1566,19 @@ void DocumentCanvas::onInkReloaded()
         m_inkDirtyPages.insert(it.key());
         ensureInkGeometry(it.key());
     }
+
+    // Вкладыши сменились целиком: порядок перекрытия - заново по id.
+    if (m_wetInsert != 0)
+        cancelInk();
+    m_insertGeometry.clear();
+    m_insertDirty.clear();
+    m_insertZOrder.clear();
+    if (m_ink) {
+        for (const InkInsert &insert : m_ink->allInserts())
+            m_insertZOrder.append(insert.id);
+    }
+    syncInsertGeometry();
+    syncInsertModel();
     update();
 }
 
@@ -1296,9 +1589,20 @@ void DocumentCanvas::ensureInkGeometry(int page)
     if (m_inkGeometry.contains(page) && !m_inkDirtyPages.contains(page))
         return;
 
+    const QList<StrokeGeometry> geometry = tessellate(m_ink->strokesOnPage(page));
+    if (geometry.isEmpty())
+        m_inkGeometry.remove(page);
+    else
+        m_inkGeometry.insert(page, geometry);
+    m_inkDirtyPages.remove(page);
+}
+
+QList<DocumentCanvas::StrokeGeometry>
+DocumentCanvas::tessellate(const QList<InkDocument::Record> &records) const
+{
     QList<StrokeGeometry> geometry;
     StrokeTessellator tessellator;
-    for (const InkDocument::Record &record : m_ink->strokesOnPage(page)) {
+    for (const InkDocument::Record &record : records) {
         tessellator.setWidth(record.stroke.width);
         StrokeGeometry entry;
         entry.id = record.id;
@@ -1307,18 +1611,218 @@ void DocumentCanvas::ensureInkGeometry(int page)
         if (!StrokeTessellator::isDegenerate(entry.strip))
             geometry.append(entry);
     }
-
-    if (geometry.isEmpty())
-        m_inkGeometry.remove(page);
-    else
-        m_inkGeometry.insert(page, geometry);
-    m_inkDirtyPages.remove(page);
+    return geometry;
 }
 
 void DocumentCanvas::dropInkGeometry(int page)
 {
     m_inkGeometry.remove(page);
     m_inkDirtyPages.remove(page);
+}
+
+// --- Вкладыши -----------------------------------------------------------------
+
+QAbstractItemModel *DocumentCanvas::insertModel() const
+{
+    return m_insertModel;
+}
+
+QRectF DocumentCanvas::insertDocRect(const InkInsert &insert) const
+{
+    // Вкладыш страницы, которой нет в документе, хранится, но не показывается.
+    if (!insert.isValid() || insert.page >= m_layout.pageCount())
+        return QRectF();
+    return insert.rect.translated(m_layout.pageRect(insert.page).topLeft());
+}
+
+QRectF DocumentCanvas::insertDocumentRect(quint64 id) const
+{
+    return m_ink ? insertDocRect(m_ink->insertById(id)) : QRectF();
+}
+
+quint64 DocumentCanvas::insertAtView(const QPointF &viewPoint) const
+{
+    if (!m_ink)
+        return 0;
+    // Сверху вниз по порядку перекрытия: касание в месте перекрытия относится
+    // к верхнему. Рамка может выходить за свою страницу, поэтому поиск идёт по
+    // документу, а не по странице под точкой.
+    const QPointF point = viewToDocument(viewPoint);
+    for (auto it = m_insertZOrder.crbegin(); it != m_insertZOrder.crend(); ++it) {
+        const InkInsert insert = m_ink->insertById(*it);
+        if (insert.open && insertDocRect(insert).contains(point))
+            return insert.id;
+    }
+    return 0;
+}
+
+QPointF DocumentCanvas::surfacePoint(const QPointF &viewPoint) const
+{
+    return viewToPage(m_wetPage, viewPoint) - m_wetOrigin;
+}
+
+void DocumentCanvas::raiseInsert(quint64 id)
+{
+    m_insertZOrder.removeOne(id);
+    m_insertZOrder.append(id);
+}
+
+void DocumentCanvas::placeInsertAt(const QPointF &viewPoint)
+{
+    // Касание раскрытого вкладыша и промежутка ничего не ставит: инструмент
+    // остаётся выбранным, чтобы можно было попасть ещё раз.
+    if (!m_ink || insertAtView(viewPoint) != 0)
+        return;
+    const int page = pageAtView(viewPoint);
+    if (page < 0)
+        return;
+
+    const QRectF rect(viewToPage(page, viewPoint), defaultInsertSize());
+    if (m_ink->addInsert(page, rect) == 0)
+        return;
+    setTool(m_toolBeforeInsert);
+}
+
+void DocumentCanvas::openInsert(quint64 id)
+{
+    if (!m_ink || !m_ink->hasInsert(id))
+        return;
+    raiseInsert(id);
+    m_ink->setInsertOpen(id, true);
+    // Уже раскрытый вкладыш сигнала не даст, а порядок перекрытия сменился.
+    syncInsertModel();
+    update();
+}
+
+void DocumentCanvas::closeInsert(quint64 id)
+{
+    if (!m_ink || !m_ink->hasInsert(id))
+        return;
+    // Пустой вкладыш не оставляет значка: случайное касание инструментом не
+    // должно мусорить на странице. Удаление - обычное действие истории, и
+    // отмена вернёт вкладыш раскрытым (design.md, D7).
+    if (m_ink->strokesInInsert(id).isEmpty()) {
+        m_ink->removeInsert(id);
+        return;
+    }
+    m_ink->setInsertOpen(id, false);
+}
+
+void DocumentCanvas::deleteInsert(quint64 id)
+{
+    if (m_ink)
+        m_ink->removeInsert(id);
+}
+
+void DocumentCanvas::resizeInsert(quint64 id, const QPointF &viewPoint)
+{
+    if (!m_ink || !m_ink->hasInsert(id))
+        return;
+    const InkInsert insert = m_ink->insertById(id);
+    // Левый верхний угол стоит на месте, правый нижний идёт за точкой, но не
+    // ближе минимального размера.
+    const QPointF corner = viewToPage(insert.page, viewPoint);
+    const QSizeF size(qMax(kMinInsertWidth, corner.x() - insert.rect.left()),
+                      qMax(kMinInsertHeight, corner.y() - insert.rect.top()));
+    m_ink->setInsertRect(id, QRectF(insert.rect.topLeft(), size));
+}
+
+int DocumentCanvas::insertGeometryStrokeCount(quint64 id) const
+{
+    return int(m_insertGeometry.value(id).size());
+}
+
+void DocumentCanvas::onInsertAdded(quint64 id)
+{
+    // Созданный или возвращённый отменой вкладыш встаёт наверх.
+    raiseInsert(id);
+    m_insertDirty.insert(id);
+    syncInsertGeometry();
+    syncInsertModel();
+    update();
+}
+
+void DocumentCanvas::onInsertChanged(quint64 id)
+{
+    Q_UNUSED(id)
+    syncInsertGeometry();
+    syncInsertModel();
+    update();
+}
+
+void DocumentCanvas::onInsertRemoved(quint64 id)
+{
+    if (m_wet.isActive() && m_wetInsert == id)
+        cancelInk();
+    m_insertZOrder.removeOne(id);
+    m_insertGeometry.remove(id);
+    m_insertDirty.remove(id);
+    syncInsertModel();
+    update();
+}
+
+void DocumentCanvas::onInsertInkChanged(quint64 id)
+{
+    // Как у страницы: геометрия пересобирается на потоке UI, иначе законченный
+    // штрих появился бы во вкладыше только после ближайшей смены вида.
+    m_insertDirty.insert(id);
+    syncInsertGeometry();
+    update();
+}
+
+void DocumentCanvas::ensureInsertGeometry(quint64 id)
+{
+    if (m_insertGeometry.contains(id) && !m_insertDirty.contains(id))
+        return;
+    // Пустой список тоже хранится: так пустой раскрытый вкладыш не
+    // тесселируется заново на каждом кадре панорамы.
+    m_insertGeometry.insert(id, tessellate(m_ink->strokesInInsert(id)));
+    m_insertDirty.remove(id);
+}
+
+// Геометрия чернил вкладышей живёт ровно у раскрытых вкладышей удерживаемых
+// страниц: как у страниц, и ещё без свёрнутых - их содержимого не видно.
+void DocumentCanvas::syncInsertGeometry()
+{
+    if (!m_ink) {
+        m_insertGeometry.clear();
+        m_insertDirty.clear();
+        return;
+    }
+    for (auto it = m_insertGeometry.begin(); it != m_insertGeometry.end();) {
+        const InkInsert insert = m_ink->insertById(it.key());
+        if (!insert.open || !m_keepPages.contains(insert.page))
+            it = m_insertGeometry.erase(it);
+        else
+            ++it;
+    }
+    for (quint64 id : std::as_const(m_insertZOrder)) {
+        const InkInsert insert = m_ink->insertById(id);
+        if (insert.open && m_keepPages.contains(insert.page))
+            ensureInsertGeometry(id);
+    }
+}
+
+void DocumentCanvas::syncInsertModel()
+{
+    if (!m_insertModel)
+        return;
+    if ((!m_ink || m_ink->insertCount() == 0) && m_insertModel->rowCount() == 0)
+        return;
+
+    QList<InsertListModel::Row> rows;
+    if (m_ink) {
+        for (const InkInsert &insert : m_ink->allInserts()) {
+            if (!m_keepPages.contains(insert.page))
+                continue;
+            const QRectF rect = insertDocRect(insert);
+            if (rect.isEmpty())
+                continue;
+            rows.append({insert.id, insert.page, rect, insert.open,
+                         int(m_insertZOrder.indexOf(insert.id))});
+        }
+    }
+    m_insertModel->sync(rows);
 }
 
 // --- Ввод --------------------------------------------------------------------

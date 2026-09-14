@@ -1,6 +1,7 @@
 // Задачи 5.6, 5.7, 5.8: чернила в координатах страницы, ластик, отмена и
 // повтор. Сценарии из specs/ink-input/spec.md.
 
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTest>
 
@@ -218,6 +219,214 @@ private slots:
 
         // Новые штрихи получают идентификаторы после загруженных.
         QCOMPARE(ink.addStroke(lineOnPage(3, QPointF(0, 0), QPointF(5, 5))), quint64(12));
+    }
+
+    // --- Вкладыши (задачи 1.2-1.5 add-ink-inserts) ------------------------
+
+    // Задача 1.2: чернила вкладыша не видны как чернила страницы.
+    void insertInkIsSeparateFromPageInk()
+    {
+        InkDocument ink;
+        const quint64 pageStroke = ink.addStroke(lineOnPage(2, QPointF(0, 0), QPointF(50, 50)));
+        const quint64 insert = ink.addInsert(2, QRectF(100, 100, 200, 140));
+        QVERIFY(insert != 0);
+        QVERIFY(ink.insertById(insert).open);
+
+        QSignalSpy pageChanged(&ink, &InkDocument::pageChanged);
+        QSignalSpy insertInk(&ink, &InkDocument::insertInkChanged);
+        const quint64 insertStroke = ink.addStroke(inInsert(insert, QPointF(5, 5), QPointF(60, 20)));
+        QVERIFY(insertStroke != 0);
+        // Геометрия страницы от штриха вкладыша не пересобирается.
+        QCOMPARE(pageChanged.size(), 0);
+        QCOMPARE(insertInk.size(), 1);
+
+        QCOMPARE(ink.strokesOnPage(2).size(), 1);
+        QCOMPARE(ink.strokesOnPage(2).first().id, pageStroke);
+        QCOMPARE(ink.allStrokes().size(), 1);
+        QCOMPARE(ink.strokesInInsert(insert).size(), 1);
+        QCOMPARE(ink.strokesInInsert(insert).first().id, insertStroke);
+        // Страница у штриха вкладыша - страница вкладыша, точки - локальные.
+        QCOMPARE(ink.strokesInInsert(insert).first().stroke.page, 2);
+        QCOMPARE(ink.strokesInInsert(insert).first().stroke.points.first().position,
+                 QPointF(5, 5));
+        QCOMPARE(ink.strokeCount(), 2);
+
+        // Ластик страницы не видит вкладыш, ластик вкладыша - страницу.
+        QVERIFY(ink.strokesNear(2, QPointF(30, 12), 4.0).isEmpty());
+        QCOMPARE(ink.strokesNearInInsert(insert, QPointF(30, 12), 4.0),
+                 QList<quint64>({insertStroke}));
+        QVERIFY(ink.strokesNearInInsert(insert, QPointF(25, 25), 1.0).isEmpty());
+    }
+
+    void insertStrokeRequiresExistingInsert()
+    {
+        InkDocument ink;
+        QCOMPARE(ink.addStroke(inInsert(42, QPointF(0, 0), QPointF(10, 10))), quint64(0));
+        QCOMPARE(ink.addInsert(0, QRectF(0, 0, 0, 10)), quint64(0));
+        QCOMPARE(ink.addInsert(-1, QRectF(0, 0, 10, 10)), quint64(0));
+        QCOMPARE(ink.insertCount(), 0);
+    }
+
+    void insertAtFindsTopOpenInsert()
+    {
+        InkDocument ink;
+        const quint64 lower = ink.addInsert(0, QRectF(0, 0, 100, 100));
+        const quint64 upper = ink.addInsert(0, QRectF(50, 50, 100, 100));
+        QCOMPARE(ink.insertAt(0, QPointF(10, 10)), lower);
+        QCOMPARE(ink.insertAt(0, QPointF(75, 75)), upper);
+        QCOMPARE(ink.insertAt(1, QPointF(75, 75)), quint64(0));
+
+        ink.setInsertOpen(upper, false);
+        QCOMPARE(ink.insertAt(0, QPointF(75, 75)), lower);
+        QCOMPARE(ink.insertsOnPage(0).size(), 2);
+    }
+
+    // Задача 1.3: удаление вкладыша с тремя штрихами - одно действие.
+    void removingInsertUndoesAsOne()
+    {
+        InkDocument ink;
+        const QRectF rect(40, 60, 180, 120);
+        const quint64 insert = ink.addInsert(5, rect);
+        QList<quint64> ids;
+        for (int i = 0; i < 3; ++i)
+            ids.append(ink.addStroke(inInsert(insert, QPointF(0, i * 10), QPointF(90, i * 10))));
+        ink.setInsertRect(insert, QRectF(40, 60, 240, 90));
+
+        QSignalSpy removed(&ink, &InkDocument::insertRemoved);
+        ink.removeInsert(insert);
+        QCOMPARE(removed.size(), 1);
+        QVERIFY(!ink.hasInsert(insert));
+        QCOMPARE(ink.strokeCount(), 0);
+        QVERIFY(ink.strokesInInsert(insert).isEmpty());
+
+        ink.undo();
+        QVERIFY(ink.hasInsert(insert));
+        QCOMPARE(ink.insertById(insert).rect, QRectF(40, 60, 240, 90));
+        QCOMPARE(ink.insertById(insert).page, 5);
+        QCOMPARE(ink.strokesInInsert(insert).size(), 3);
+        for (int i = 0; i < 3; ++i)
+            QCOMPARE(ink.strokesInInsert(insert)[i].id, ids[i]);
+
+        ink.redo();
+        QVERIFY(!ink.hasInsert(insert));
+        QCOMPARE(ink.strokeCount(), 0);
+    }
+
+    // Сценарий «Отмена не трогает размер».
+    void undoAfterResizeUndoesStrokeNotSize()
+    {
+        InkDocument ink;
+        const quint64 insert = ink.addInsert(0, QRectF(0, 0, 100, 100));
+        ink.addStroke(inInsert(insert, QPointF(0, 0), QPointF(50, 50)));
+        ink.setInsertRect(insert, QRectF(0, 0, 300, 200));
+
+        ink.undo();
+        QCOMPARE(ink.strokesInInsert(insert).size(), 0);
+        QCOMPARE(ink.insertById(insert).rect, QRectF(0, 0, 300, 200));
+    }
+
+    // Сценарий «Отмена штриха во вкладыше»: общая история.
+    void undoOrderSpansPageAndInsert()
+    {
+        InkDocument ink;
+        const quint64 insert = ink.addInsert(0, QRectF(0, 0, 100, 100));
+        ink.addStroke(lineOnPage(0, QPointF(200, 200), QPointF(300, 300)));
+        ink.addStroke(inInsert(insert, QPointF(0, 0), QPointF(50, 50)));
+
+        ink.undo();
+        QCOMPARE(ink.strokesInInsert(insert).size(), 0);
+        QCOMPARE(ink.strokesOnPage(0).size(), 1);
+        ink.undo();
+        QCOMPARE(ink.strokesOnPage(0).size(), 0);
+    }
+
+    // Создание, размер и раскрытие не обрывают ветку повтора.
+    void insertEditsKeepRedoBranch()
+    {
+        InkDocument ink;
+        ink.addStroke(lineOnPage(0, QPointF(0, 0), QPointF(10, 10)));
+        ink.undo();
+        QVERIFY(ink.canRedo());
+
+        const quint64 insert = ink.addInsert(0, QRectF(0, 0, 100, 100));
+        ink.setInsertRect(insert, QRectF(0, 0, 120, 100));
+        ink.setInsertOpen(insert, false);
+        QVERIFY(ink.canRedo());
+        QVERIFY(!ink.canUndo());
+    }
+
+    // Задача 1.4: ни одна запись истории не применяется к несуществующему
+    // вкладышу.
+    void historyNeverReferencesMissingInsert()
+    {
+        QTest::failOnWarning(QRegularExpression(QStringLiteral("несуществующий вкладыш")));
+
+        InkDocument ink;
+        const quint64 a = ink.addInsert(0, QRectF(0, 0, 100, 100));
+        const quint64 b = ink.addInsert(1, QRectF(0, 0, 100, 100));
+        const quint64 s1 = ink.addStroke(inInsert(a, QPointF(0, 10), QPointF(90, 10)));
+        ink.addStroke(inInsert(a, QPointF(0, 30), QPointF(90, 30)));
+        ink.addStroke(inInsert(b, QPointF(0, 30), QPointF(90, 30)));
+        ink.addStroke(lineOnPage(0, QPointF(0, 0), QPointF(10, 10)));
+        ink.eraseStrokes({s1});
+        ink.removeInsert(a);
+        ink.addStroke(inInsert(b, QPointF(0, 50), QPointF(90, 50)));
+        ink.removeInsert(b);
+
+        int undone = 0;
+        while (ink.canUndo()) {
+            ink.undo();
+            ++undone;
+        }
+        QCOMPARE(undone, 8);
+        QCOMPARE(ink.strokeCount(), 0);
+        QCOMPARE(ink.insertCount(), 2); // создание в историю не идёт
+
+        while (ink.canRedo())
+            ink.redo();
+        QCOMPARE(ink.insertCount(), 0);
+        QCOMPARE(ink.strokeCount(), 1); // остался штрих страницы
+    }
+
+    // Задача 1.5: загрузка вкладышей мимо истории.
+    void loadRestoresInsertsWithoutHistory()
+    {
+        InkDocument ink;
+        InkInsert open{3, 1, QRectF(10, 20, 200, 140), true};
+        InkInsert closed{7, 4, QRectF(0, 0, 60, 40), false};
+
+        QList<InkDocument::Record> records;
+        records.append({10, lineOnPage(1, QPointF(0, 0), QPointF(10, 10))});
+        records.append({11, inInsert(3, QPointF(0, 0), QPointF(10, 10))});
+        records.append({12, inInsert(7, QPointF(0, 0), QPointF(10, 10))});
+        // Штрих пропавшего вкладыша не должен оказаться на странице.
+        records.append({13, inInsert(99, QPointF(0, 0), QPointF(10, 10))});
+
+        QSignalSpy reloaded(&ink, &InkDocument::reloaded);
+        ink.loadStrokes(records, 14, {open, closed}, 8);
+        QCOMPARE(reloaded.size(), 1);
+        QVERIFY(!ink.canUndo());
+        QCOMPARE(ink.insertCount(), 2);
+        QVERIFY(ink.insertById(3).open);
+        QVERIFY(!ink.insertById(7).open);
+        QCOMPARE(ink.insertById(3).rect, QRectF(10, 20, 200, 140));
+        QCOMPARE(ink.strokesInInsert(3).size(), 1);
+        QCOMPARE(ink.strokesInInsert(7).first().stroke.page, 4);
+        QCOMPARE(ink.allStrokes().size(), 1);
+        QCOMPARE(ink.strokeCount(), 3);
+        QCOMPARE(ink.addInsert(0, QRectF(0, 0, 10, 10)), quint64(8));
+
+        ink.clear();
+        QCOMPARE(ink.insertCount(), 0);
+        QCOMPARE(ink.strokeCount(), 0);
+    }
+
+private:
+    static Stroke inInsert(quint64 insert, const QPointF &from, const QPointF &to)
+    {
+        Stroke stroke = lineOnPage(0, from, to);
+        stroke.insert = insert;
+        return stroke;
     }
 };
 

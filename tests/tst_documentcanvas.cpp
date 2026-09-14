@@ -847,6 +847,65 @@ private slots:
         QCOMPARE(canvas.placeholderPageCount(), 0);
         QCOMPARE(canvas.liveTextureCount(), 0);
     }
+
+    // Задача 4.7 add-ink-inserts: модель вкладышей для QML не дёргается на
+    // кадрах зума и панорамы, а смена размера меняет ровно одну строку.
+    void insertModelIsQuietDuringZoomAndPan()
+    {
+        PdfDocumentModel model;
+        QVERIFY(model.open(fixtures::textbook()));
+        InkDocument ink;
+        DocumentCanvas canvas;
+        canvas.setSize(QSizeF(900, 700));
+        canvas.setDocument(&model);
+        canvas.setInk(&ink);
+        canvas.goToPage(0);
+
+        canvas.setTool(DocumentCanvas::Tool::Insert);
+        canvas.beginInkAt(QPointF(400, 150), 0.6, false);
+        canvas.endInk();
+        const quint64 placed = canvas.insertZOrder().constLast();
+        ink.addInsert(1, QRectF(20, 20, 100, 80));
+
+        QAbstractItemModel *inserts = canvas.insertModel();
+        QCOMPARE(inserts->rowCount(), 2);
+        const int idRole = inserts->roleNames().key("insertId");
+        const int rectRole = inserts->roleNames().key("docRect");
+        int placedRow = -1;
+        for (int row = 0; row < inserts->rowCount(); ++row) {
+            if (inserts->data(inserts->index(row, 0), idRole).toULongLong() == placed)
+                placedRow = row;
+        }
+        QVERIFY(placedRow >= 0);
+        QCOMPARE(inserts->data(inserts->index(placedRow, 0), rectRole).toRectF(),
+                 canvas.insertDocumentRect(placed));
+
+        QSignalSpy changed(inserts, &QAbstractItemModel::dataChanged);
+        QSignalSpy reset(inserts, &QAbstractItemModel::modelReset);
+        QSignalSpy inserted(inserts, &QAbstractItemModel::rowsInserted);
+        QSignalSpy removed(inserts, &QAbstractItemModel::rowsRemoved);
+
+        for (int step = 0; step < 10; ++step) {
+            canvas.zoomAt(QPointF(450, 350), canvas.zoom() * 1.05);
+            canvas.panBy(QPointF(3, -4));
+        }
+        for (int step = 0; step < 10; ++step) {
+            canvas.panBy(QPointF(-3, 4));
+            canvas.zoomAt(QPointF(450, 350), canvas.zoom() / 1.05);
+        }
+        QCOMPARE(changed.size(), 0);
+        QCOMPARE(reset.size(), 0);
+        QCOMPARE(inserted.size(), 0);
+        QCOMPARE(removed.size(), 0);
+
+        canvas.resizeInsert(placed, QPointF(700, 500));
+        QCOMPARE(changed.size(), 1);
+        QCOMPARE(changed.first().at(0).value<QModelIndex>().row(), placedRow);
+        QCOMPARE(changed.first().at(1).value<QModelIndex>().row(), placedRow);
+        QCOMPARE(inserts->data(inserts->index(placedRow, 0), rectRole).toRectF(),
+                 canvas.insertDocumentRect(placed));
+        QCOMPARE(reset.size(), 0);
+    }
 };
 
 QTEST_MAIN(TestDocumentCanvas)

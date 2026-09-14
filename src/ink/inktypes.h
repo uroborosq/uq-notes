@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QList>
 #include <QPointF>
+#include <QRectF>
 
 // Инструмент, которым нанесён штрих.
 enum class InkTool {
@@ -31,6 +32,11 @@ struct InkPoint
 struct Stroke
 {
     int page = -1;
+    // Вкладыш, которому принадлежит штрих; 0 - чернила самой страницы. Точки
+    // штриха вкладыша лежат в локальных координатах вкладыша: относительно
+    // левого верхнего угла его рамки, в точках страницы. Поэтому изменение
+    // размера вкладыша не трогает ни одной точки (design.md, D2).
+    quint64 insert = 0;
     InkTool tool = InkTool::Pen;
     QColor color = QColor(20, 24, 40);
     // Толщина при полном нажиме, в точках страницы.
@@ -38,4 +44,17 @@ struct Stroke
     QList<InkPoint> points;
 
     bool isValid() const { return page >= 0 && points.size() >= 2; }
+};
+
+// Вкладыш: листок с белым фоном, вложенный в страницу. Рамка - в координатах
+// страницы, её левый верхний угол - точка установки, где стоит значок
+// свёрнутого вкладыша. Рамка может выходить за край страницы.
+struct InkInsert
+{
+    quint64 id = 0;
+    int page = -1;
+    QRectF rect;
+    bool open = true;
+
+    bool isValid() const { return page >= 0 && !rect.isEmpty(); }
 };

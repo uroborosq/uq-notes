@@ -394,6 +394,78 @@ private slots:
         QVERIFY(!exporter.isBusy());
     }
 
+    // Задача 5.6 add-ink-inserts, сценарий «Экспорт документа с вкладышами».
+    void insertInkIsNotExported()
+    {
+        PdfDocumentModel document;
+        QVERIFY(document.open(fixtures::noOutline()));
+        const Prepared prepared = prepare(document);
+
+        InkDocument ink;
+        // Красная линия страницы, середину которой закроет вкладыш.
+        Stroke pageStroke;
+        pageStroke.page = 0;
+        pageStroke.width = 10.0;
+        pageStroke.color = QColor(220, 20, 30);
+        for (int i = 0; i <= 20; ++i)
+            pageStroke.points.append({QPointF(60 + i * 23.0, 300), 1.0, i / 200.0});
+        QVERIFY(ink.addStroke(pageStroke) != 0);
+
+        const quint64 insert = ink.addInsert(0, QRectF(200, 250, 200, 140));
+        // Синяя линия вкладыша: в координатах страницы - y = 350, x 220..380.
+        Stroke insertStroke;
+        insertStroke.insert = insert;
+        insertStroke.width = 10.0;
+        insertStroke.color = QColor(20, 30, 220);
+        for (int i = 0; i <= 20; ++i)
+            insertStroke.points.append({QPointF(20 + i * 8.0, 100), 1.0, i / 200.0});
+        QVERIFY(ink.addStroke(insertStroke) != 0);
+
+        const QString output = m_dir.filePath(QStringLiteral("with-insert.pdf"));
+        QString error;
+        QVERIFY2(NoteExporter::exportNow(fixtures::noOutline(), prepared.sizes,
+                                         prepared.rotations, ink.allStrokes(), output, &error),
+                 qPrintable(error));
+
+        // 72 точки на дюйм: пиксель - точка страницы.
+        const QString png = m_dir.filePath(QStringLiteral("with-insert"));
+        QProcess render;
+        render.start(QStringLiteral("pdftoppm"),
+                     {QStringLiteral("-f"), QStringLiteral("1"), QStringLiteral("-l"),
+                      QStringLiteral("1"), QStringLiteral("-r"), QStringLiteral("72"),
+                      QStringLiteral("-png"), output, png});
+        QVERIFY(render.waitForFinished(60000));
+        const QFileInfo root(png);
+        const QStringList produced =
+            QDir(root.absolutePath())
+                .entryList({root.fileName() + QStringLiteral("-*.png")}, QDir::Files);
+        QVERIFY(!produced.isEmpty());
+        const QImage image(QDir(root.absolutePath()).filePath(produced.first()));
+        QVERIFY(!image.isNull());
+
+        const auto anyPixel = [&image](const QRect &area, const auto &predicate) {
+            for (int y = area.top(); y <= area.bottom(); ++y) {
+                for (int x = area.left(); x <= area.right(); ++x) {
+                    if (image.valid(x, y) && predicate(image.pixelColor(x, y)))
+                        return true;
+                }
+            }
+            return false;
+        };
+        const auto red = [](const QColor &c) {
+            return c.red() > 150 && c.green() < 110 && c.blue() < 110;
+        };
+        const auto blue = [](const QColor &c) {
+            return c.blue() > 150 && c.red() < 110 && c.green() < 110;
+        };
+
+        // Чернила страницы на месте и там, где их закрывал вкладыш.
+        QVERIFY2(anyPixel(QRect(295, 297, 10, 6), red), "закрытые вкладышем чернила страницы пропали");
+        QVERIFY(anyPixel(QRect(80, 297, 10, 6), red));
+        // Ни чернил вкладыша, ни его белого листка поверх линии страницы.
+        QVERIFY2(!anyPixel(QRect(210, 335, 180, 30), blue), "чернила вкладыша попали в экспорт");
+    }
+
 private:
     QTemporaryDir m_dir;
 };

@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QPointer>
 #include <QQmlEngine>
 #include <QSet>
 #include <QSqlDatabase>
@@ -10,7 +11,8 @@
 
 #include "ink/inkdocument.h"
 
-// Файл заметки `.uqn`: чернила, состояние просмотра и ссылка на исходный PDF.
+// Файл заметки `.uqn`: чернила, вкладыши, состояние просмотра и ссылка на
+// исходный PDF.
 //
 // Внутри - SQLite в режиме WAL. Единый JSON пришлось бы переписывать целиком
 // на каждое сохранение, а это пауза посреди письма; здесь автосохранение - это
@@ -94,7 +96,8 @@ public:
 
     bool isDirty() const
     {
-        return !m_pendingStrokes.isEmpty() || m_viewStateDirty || m_toolDirty;
+        return !m_pendingStrokes.isEmpty() || !m_pendingInserts.isEmpty() || m_viewStateDirty
+            || m_toolDirty;
     }
     // Записывает накопленные изменения одной транзакцией.
     Q_INVOKABLE bool flush();
@@ -131,6 +134,9 @@ private:
     bool setMeta(const QString &key, const QString &value);
     QString meta(const QString &key) const;
     bool writeStroke(const InkDocument::Record &record);
+    bool writeInsertStroke(const InkDocument::Record &record);
+    bool writeInsert(const InkInsert &insert);
+    bool exec(const QString &statement, const QVariantList &values);
     void markDirty();
 
     QSqlDatabase m_database;
@@ -141,11 +147,18 @@ private:
     QString m_sourceHash;
     QString m_errorString;
 
-    InkDocument *m_ink = nullptr;
+    // Модель может уйти раньше хранилища: в QML оба - дети окна, и порядок их
+    // уничтожения не гарантирован. Последнее сохранение из деструктора не
+    // должно разыменовать уже удалённую модель.
+    QPointer<InkDocument> m_ink;
     // Штрихи, чья запись в файле разошлась с моделью. Что именно с ними делать -
-    // вписать или удалить - решается при сохранении по текущему состоянию
-    // модели: так отмена и повтор не могут оставить в файле лишнюю строку.
+    // вписать или удалить, и в какую таблицу, - решается при сохранении по
+    // текущему состоянию модели: так отмена и повтор не могут оставить в файле
+    // лишнюю строку. Штрихи страниц и вкладышей делят одно множество:
+    // идентификаторы у них из одного пространства.
     QSet<quint64> m_pendingStrokes;
+    // То же для вкладышей: рамка, состояние, удаление.
+    QSet<quint64> m_pendingInserts;
     ViewState m_viewState;
     bool m_viewStateDirty = false;
 
