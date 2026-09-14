@@ -134,6 +134,11 @@ public:
     Q_INVOKABLE InkLayering inkLayering(int page) const;
     // Сколько узлов страниц ждёт снятия с графа сцены.
     Q_INVOKABLE int pendingNodeRemovalCount() const;
+    // Докуда узлы мокрого штриха в графе сцены покрывают его полосу, в
+    // вершинах; -1 - узла нет. После кадра обязано совпадать с длиной полосы:
+    // кусок со старой геометрией за её концом дал бы число больше.
+    Q_INVOKABLE int wetInkCoveredVertexCount(int page) const;
+    int wetStripVertexCount() const { return int(m_wet.strip().size()); }
 
     FrameStats *frameStats() const { return m_frameStats; }
     void setFrameStats(FrameStats *stats);
@@ -179,8 +184,16 @@ public:
 
     // Ввод, разложенный по смыслу, а не по устройству: тесты подают его
     // напрямую, событийные обработчики - через разбор QPointerEvent.
-    Q_INVOKABLE bool beginInkAt(const QPointF &viewPoint, qreal pressure, bool eraser);
-    Q_INVOKABLE void continueInkAt(const QPointF &viewPoint, qreal pressure);
+    //
+    // timeSeconds - время отсчёта пера. Обработчики событий подают метку
+    // времени самого события: пачка событий, разобранная за один проход
+    // цикла, иначе получила бы почти одно время, и модель штриха увидела бы
+    // скачок скорости, которого не было. Отрицательное значение - «сейчас»:
+    // так зовут сценарный ввод и тесты, которым время отсчёта не важно.
+    Q_INVOKABLE bool beginInkAt(const QPointF &viewPoint, qreal pressure, bool eraser,
+                                qreal timeSeconds = -1.0);
+    Q_INVOKABLE void continueInkAt(const QPointF &viewPoint, qreal pressure,
+                                   qreal timeSeconds = -1.0);
     Q_INVOKABLE void endInk();
     Q_INVOKABLE void cancelInk();
 

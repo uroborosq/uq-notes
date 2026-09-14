@@ -4,9 +4,12 @@
 #include <QMetaEnum>
 #include <QPointerEvent>
 #include <QPointingDevice>
+#include <QQuickWindow>
 #include <QTextStream>
 
 namespace {
+
+bool s_rateMode = false;
 
 QString deviceTypeName(const QInputDevice *device)
 {
@@ -85,11 +88,32 @@ ProbeItem::ProbeItem(QQuickItem *parent)
     setAcceptedMouseButtons(Qt::AllButtons);
     setAcceptTouchEvents(true);
     setAcceptHoverEvents(true);
+
+    // Кадры окна: по ним видно, сколько отсчётов пера успевает прийти между
+    // двумя кадрами - столько же их получил бы холст за один update().
+    connect(this, &QQuickItem::windowChanged, this, [this](QQuickWindow *window) {
+        if (window)
+            connect(window, &QQuickWindow::frameSwapped, this, &ProbeItem::onFrameSwapped);
+    });
+}
+
+void ProbeItem::setRateMode(bool enabled)
+{
+    s_rateMode = enabled;
 }
 
 void ProbeItem::reset()
 {
     m_log.clear();
+    m_stylusContact = false;
+    m_contactStartTs = m_lastStylusTs = 0;
+    m_contactStrokes = 0;
+    m_contactMoves = 0;
+    m_contactMs = 0;
+    m_duplicateTimestamps = m_backwardTimestamps = 0;
+    m_intervalHistogram.clear();
+    m_movesSinceFrame = 0;
+    m_movesPerFrame.clear();
     m_stylusEvents = m_eraserEvents = m_touchEvents = m_mouseEvents = 0;
     m_buttonEvents = 0;
     m_stylusTabletEvents = m_stylusMouseEvents = 0;
@@ -111,6 +135,8 @@ void ProbeItem::reset()
 
 void ProbeItem::record(const QString &line)
 {
+    if (s_rateMode)
+        return;
     QTextStream(stdout) << line << Qt::endl;
     m_log.append(line);
     while (m_log.size() > 200)
@@ -225,6 +251,64 @@ void ProbeItem::noteGesture(const QNativeGestureEvent *event)
     emit summaryChanged();
 }
 
+void ProbeItem::noteStylusTiming(const QMouseEvent *event)
+{
+    const auto *device = event->pointingDevice();
+    if (!device
+        || (device->type() != QInputDevice::DeviceType::Stylus
+            && device->type() != QInputDevice::DeviceType::Airbrush)) {
+        return;
+    }
+
+    const quint64 ts = event->timestamp();
+    switch (event->type()) {
+    case QEvent::MouseButtonPress:
+        if (event->button() != Qt::LeftButton)
+            return;
+        m_stylusContact = true;
+        m_contactStartTs = m_lastStylusTs = ts;
+        m_movesSinceFrame = 0;
+        ++m_contactStrokes;
+        break;
+    case QEvent::MouseMove:
+        if (!m_stylusContact || !event->buttons().testFlag(Qt::LeftButton))
+            return;
+        if (ts == m_lastStylusTs)
+            ++m_duplicateTimestamps;
+        else if (ts < m_lastStylusTs)
+            ++m_backwardTimestamps;
+        else
+            ++m_intervalHistogram[int(qMin<quint64>(ts - m_lastStylusTs, 20))];
+        m_lastStylusTs = qMax(m_lastStylusTs, ts);
+        ++m_contactMoves;
+        ++m_movesSinceFrame;
+        break;
+    case QEvent::MouseButtonRelease:
+        if (event->button() != Qt::LeftButton || !m_stylusContact)
+            return;
+        m_stylusContact = false;
+        m_contactMs += m_lastStylusTs - m_contactStartTs;
+        break;
+    default:
+        return;
+    }
+
+    // Как холст: каждое событие пера просит кадр. Без этого окно не
+    // перерисовывалось бы, и считать отсчёты на кадр было бы не по чему.
+    if (window())
+        window()->update();
+    if (!s_rateMode || event->type() == QEvent::MouseButtonRelease)
+        emit summaryChanged();
+}
+
+void ProbeItem::onFrameSwapped()
+{
+    if (!m_stylusContact)
+        return;
+    ++m_movesPerFrame[qMin(m_movesSinceFrame, 12)];
+    m_movesSinceFrame = 0;
+}
+
 bool ProbeItem::event(QEvent *event)
 {
     switch (event->type()) {
@@ -270,6 +354,7 @@ bool ProbeItem::event(QEvent *event)
     case QEvent::MouseMove:
     case QEvent::MouseButtonRelease: {
         auto *mouse = static_cast<QMouseEvent *>(event);
+        noteStylusTiming(mouse);
         // Событие мыши может нести устройство Stylus: Qt Quick доставляет перо
         // элементу именно так, сохраняя давление и тип указателя.
         note(mouse, mouse->points().first(),
@@ -325,6 +410,27 @@ QString ProbeItem::summary() const
                << ", sum(pan delta) = " << QString::number(m_lastGesturePanSum.x(), 'f', 1) << ","
                << QString::number(m_lastGesturePanSum.y(), 'f', 1) << "\n";
     }
+    stream << "\nSTYLUS RATE (compress high-frequency events: "
+           << (QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents) ? "ON" : "OFF")
+           << ")\n"
+           << "  strokes: " << m_contactStrokes << ", moves in contact: " << m_contactMoves
+           << ", contact time: " << m_contactMs << " ms\n";
+    if (m_contactMs > 0) {
+        stream << "  rate: " << QString::number(m_contactMoves * 1000.0 / m_contactMs, 'f', 1)
+               << " Hz\n";
+    }
+    stream << "  duplicate timestamps: " << m_duplicateTimestamps
+           << ", backward timestamps: " << m_backwardTimestamps << "\n"
+           << "  interval ms -> count:";
+    for (auto it = m_intervalHistogram.cbegin(); it != m_intervalHistogram.cend(); ++it)
+        stream << " " << (it.key() >= 20 ? QStringLiteral(">=20") : QString::number(it.key()))
+               << ":" << it.value();
+    stream << "\n  moves per frame -> frames:";
+    for (auto it = m_movesPerFrame.cbegin(); it != m_movesPerFrame.cend(); ++it)
+        stream << " " << (it.key() >= 12 ? QStringLiteral(">=12") : QString::number(it.key()))
+               << ":" << it.value();
+    stream << "\n";
+
     stream << "\nVERDICT\n"
            << "  pressure continuous: "
            << (m_distinctPressureValues > 10 ? "YES" : "NO - fallback to libinput") << "\n"

@@ -6,7 +6,7 @@
 
 pkgname=uq-notes
 # Держать в согласии с project(... VERSION ...) в корневом CMakeLists.txt.
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Рукописные заметки поверх PDF для Wayland: перо с нажимом, оглавление, экспорт"
 arch=('x86_64')
@@ -14,7 +14,10 @@ url="https://github.com/uroborosq/uq-notes"
 license=('custom')
 
 # QtPdf в Arch поставляется внутри qt6-webengine - отдельного пакета для него нет.
-depends=('qt6-base' 'qt6-declarative' 'qt6-webengine' 'qt6-wayland' 'qpdf'
+# abseil-cpp нужен модели траектории штриха (third_party/ink-stroke-modeler).
+# Библиотеки Abseil линкуются динамически: после обновления abseil-cpp с новым
+# soname пакет надо пересобрать.
+depends=('qt6-base' 'qt6-declarative' 'qt6-webengine' 'qt6-wayland' 'qpdf' 'abseil-cpp'
          'hicolor-icon-theme')
 makedepends=('cmake' 'librsvg')
 optdepends=('poppler: сторонняя проверка экспортированных PDF')

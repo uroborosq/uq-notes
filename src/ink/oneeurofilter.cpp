@@ -56,20 +56,3 @@ qreal OneEuroFilter::filter(qreal value, qreal timeSeconds)
     m_lastValue = a * value + (1.0 - a) * m_lastValue;
     return m_lastValue;
 }
-
-OneEuroPointFilter::OneEuroPointFilter(qreal minCutoff, qreal beta, qreal derivativeCutoff)
-    : m_x(minCutoff, beta, derivativeCutoff)
-    , m_y(minCutoff, beta, derivativeCutoff)
-{
-}
-
-void OneEuroPointFilter::reset()
-{
-    m_x.reset();
-    m_y.reset();
-}
-
-QPointF OneEuroPointFilter::filter(const QPointF &point, qreal timeSeconds)
-{
-    return QPointF(m_x.filter(point.x(), timeSeconds), m_y.filter(point.y(), timeSeconds));
-}

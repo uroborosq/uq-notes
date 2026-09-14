@@ -6,6 +6,9 @@
 // растёт вместе со скоростью, поэтому медленное ведение пера сглаживается
 // сильно, а быстрое почти не трогается - именно это позволяет убрать дрожь,
 // не искажая форму буквы.
+//
+// Сейчас им сглаживается только давление: траекторию ведёт модель штриха в
+// StrokeSampler, а скачок давления виден ступенькой толщины.
 class OneEuroFilter
 {
 public:
@@ -28,19 +31,4 @@ private:
     qreal m_lastTime = 0.0;
     qreal m_lastValue = 0.0;
     qreal m_lastDerivative = 0.0;
-};
-
-// Тот же фильтр для точки: координаты фильтруются независимо.
-class OneEuroPointFilter
-{
-public:
-    OneEuroPointFilter() = default;
-    OneEuroPointFilter(qreal minCutoff, qreal beta, qreal derivativeCutoff);
-
-    void reset();
-    QPointF filter(const QPointF &point, qreal timeSeconds);
-
-private:
-    OneEuroFilter m_x;
-    OneEuroFilter m_y;
 };

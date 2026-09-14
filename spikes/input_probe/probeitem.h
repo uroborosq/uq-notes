@@ -1,8 +1,10 @@
 #pragma once
 
+#include <QMap>
 #include <QQuickItem>
 #include <QStringList>
 
+class QMouseEvent;
 class QNativeGestureEvent;
 
 // Единственная точка входа для всех указателей: печатает тип устройства,
@@ -24,6 +26,11 @@ public:
     Q_INVOKABLE void reset();
     Q_INVOKABLE void dumpSummary() const;
 
+    // Режим подсчёта частоты: построчный журнал не пишется. Журнал на каждое
+    // событие сам тормозит цикл событий, и тогда замер меряет не доставку
+    // отсчётов пера, а скорость ListView.
+    static void setRateMode(bool enabled);
+
 signals:
     void logChanged();
     void summaryChanged();
@@ -35,8 +42,29 @@ private:
     void record(const QString &line);
     void note(const QPointerEvent *event, const QEventPoint &point, const QString &kind);
     void noteGesture(const QNativeGestureEvent *event);
+    void noteStylusTiming(const QMouseEvent *event);
+    void onFrameSwapped();
 
     QStringList m_log;
+
+    // Частота отсчётов пера (rnote-grade-stroke-fidelity, задача 1.1). Всё
+    // считается только по мышиным событиям от Stylus при касании: именно они
+    // доходят до холста на целевом устройстве. Время - QInputEvent::timestamp(),
+    // то есть время отсчёта, а не момент обработки.
+    bool m_stylusContact = false;
+    quint64 m_contactStartTs = 0;
+    quint64 m_lastStylusTs = 0;
+    int m_contactStrokes = 0;
+    qint64 m_contactMoves = 0;
+    quint64 m_contactMs = 0;
+    int m_duplicateTimestamps = 0;
+    int m_backwardTimestamps = 0;
+    // Интервал между соседними отсчётами в мс -> число; всё от 20 мс - в одной
+    // корзине.
+    QMap<int, int> m_intervalHistogram;
+    // Сколько перемещений пера пришло между соседними кадрами окна.
+    int m_movesSinceFrame = 0;
+    QMap<int, int> m_movesPerFrame;
 
     // Нативные жесты тачпада. По суммам за жест видно, что лежит в value():
     // приращение масштаба (тогда 1 + Σ value сходится с тем, во сколько раз

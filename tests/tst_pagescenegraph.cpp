@@ -193,6 +193,55 @@ private slots:
         QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::AboveRaster);
     }
 
+    // rnote-grade-stroke-fidelity, задача 5.3: полоса мокрого штриха
+    // укорачивается, когда пересобирается провизорный хвост, и узлы графа сцены
+    // обязаны покрывать ровно её - в том числе через границу кусков в 512
+    // вершин.
+    void wetStrokeNodesFollowShrinkingStrip()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+
+        // Волна с чередованием разгона и остановок на месте: на разгоне хвост
+        // длинный, на остановке модель догоняет перо, и хвост сжимается.
+        const QPointF start(260, 300);
+        QVERIFY(canvas->pageAtView(start) == 0);
+        qreal x = start.x();
+        qreal time = 3.0;
+        QVERIFY(canvas->beginInkAt(start, 0.6, false, time));
+
+        int peak = 0;
+        int shrinks = 0;
+        int previous = 0;
+        for (int i = 1; i <= 400; ++i) {
+            time += 1.0 / 240.0;
+            if ((i / 20) % 2 == 0)
+                x += 3.0;
+            canvas->continueInkAt(QPointF(x, start.y() + 40.0 * std::sin((x - start.x()) / 30.0)),
+                                  0.6, time);
+            renderFrames(&fixture.window);
+
+            const int strip = canvas->wetStripVertexCount();
+            if (strip < 4)
+                continue;
+            QCOMPARE(canvas->wetInkCoveredVertexCount(0), strip);
+            peak = qMax(peak, strip);
+            if (strip < previous)
+                ++shrinks;
+            previous = strip;
+        }
+
+        QVERIFY2(shrinks > 0, "эталон должен укорачивать полосу, иначе тест ничего не проверил");
+        QVERIFY2(peak > 512, qPrintable(QStringLiteral("полоса %1 не дошла до второго куска")
+                                            .arg(peak)));
+        canvas->endInk();
+    }
+
     // Сценарий «Промах по оглавлению»: ушли и тут же вернулись - страница
     // показывается готовой, без промежуточного заполнителя.
     void quickReturnKeepsPageReady()

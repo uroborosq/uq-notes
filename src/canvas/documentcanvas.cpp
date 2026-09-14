@@ -104,7 +104,9 @@ public:
     // незаполненный. Так объём работы на кадр не зависит от длины штриха.
     QSGNode *wetInk = nullptr;
     QList<QSGGeometryNode *> wetChunks;
-    int wetVertexCount = 0;
+    // Длина окончательной части полосы мокрого штриха на прошлом кадре: до неё
+    // куски не перезаливаются.
+    int wetSettledCount = 0;
 
 private:
     Layer layerOf(const QSGNode *child) const
@@ -159,6 +161,18 @@ void uploadStrip(QSGGeometryNode *node, const StrokeTessellator::Vertex *source,
 int wetChunkStart(int index)
 {
     return index * (kWetChunkVertices - kWetChunkOverlap);
+}
+
+// Время отсчёта пера из события, в секундах. Нулевая метка значит, что
+// платформа времени не сообщила, - тогда берётся момент обработки.
+qreal eventTimeSeconds(const QInputEvent *event)
+{
+    return event->timestamp() > 0 ? event->timestamp() / 1000.0 : -1.0;
+}
+
+qreal inputTimeSeconds(qreal timeSeconds)
+{
+    return timeSeconds >= 0.0 ? timeSeconds : FrameStats::nowNs() / 1e9;
 }
 
 } // namespace
@@ -239,6 +253,19 @@ QSize DocumentCanvas::textureSizeOf(int page) const
 int DocumentCanvas::inkGeometryStrokeCount(int page) const
 {
     return int(m_inkGeometry.value(page).size());
+}
+
+int DocumentCanvas::wetInkCoveredVertexCount(int page) const
+{
+    PageSceneNode *node = m_nodes.value(page);
+    if (!node || !node->wetInk)
+        return -1;
+    int covered = 0;
+    for (int index = 0; index < node->wetChunks.size(); ++index) {
+        covered = qMax(covered,
+                       wetChunkStart(index) + node->wetChunks[index]->geometry()->vertexCount());
+    }
+    return covered;
 }
 
 // Порядок детей узла страницы - это и есть порядок отрисовки, поэтому вопрос
@@ -993,7 +1020,7 @@ void DocumentCanvas::updateWetInkNodes(PageSceneNode *node)
             delete node->wetInk;
             node->wetInk = nullptr;
             node->wetChunks.clear();
-            node->wetVertexCount = 0;
+            node->wetSettledCount = 0;
         }
         return;
     }
@@ -1002,7 +1029,7 @@ void DocumentCanvas::updateWetInkNodes(PageSceneNode *node)
         node->wetInk = new QSGNode;
         node->addToLayer(node->wetInk, PageSceneNode::WetInkLayer);
         node->wetChunks.clear();
-        node->wetVertexCount = 0;
+        node->wetSettledCount = 0;
     }
 
     const int needed =
@@ -1014,21 +1041,29 @@ void DocumentCanvas::updateWetInkNodes(PageSceneNode *node)
         node->wetInk->appendChildNode(chunk);
         node->wetChunks.append(chunk);
     }
+    // Полоса мокрого штриха может укоротиться: провизорный хвост пересобирается
+    // на каждом отсчёте. Куски за её концом снимаются, а не остаются рисовать
+    // прошлую геометрию.
+    while (node->wetChunks.size() > needed) {
+        QSGGeometryNode *chunk = node->wetChunks.takeLast();
+        node->wetInk->removeChildNode(chunk);
+        delete chunk;
+    }
 
-    // Перезаливается только последний, ещё растущий кусок; предыдущие уже
-    // заполнены целиком и больше не меняются.
-    const int firstDirty = qMax(0, node->wetVertexCount == 0
-                                       ? 0
-                                       : (node->wetVertexCount - 1) / (kWetChunkVertices
-                                                                       - kWetChunkOverlap));
+    // Перезаливается всё, начиная с куска, где на прошлом кадре кончалась
+    // окончательная часть полосы: до неё вершины не меняются никогда, а после
+    // неё мог смениться весь провизорный хвост (design.md, D5).
+    const int firstChanged = qMin(node->wetSettledCount, int(strip.size()));
+    const int firstDirty =
+        qMax(0, (firstChanged - kWetChunkOverlap) / (kWetChunkVertices - kWetChunkOverlap));
     for (int index = firstDirty; index < needed; ++index) {
         const int start = wetChunkStart(index);
-        const int count = qMin(kWetChunkVertices, strip.size() - start);
-        if (count < 4)
-            continue;
+        // Кусок с номером меньше needed всегда начинается раньше двух последних
+        // вершин полосы, так что в нём не меньше трёх вершин - один треугольник.
+        const int count = qMin(kWetChunkVertices, int(strip.size()) - start);
         uploadStrip(node->wetChunks[index], strip.constData() + start, count);
     }
-    node->wetVertexCount = strip.size();
+    node->wetSettledCount = m_wet.settledVertexCount();
 }
 
 // --- Чернила -----------------------------------------------------------------
@@ -1106,7 +1141,8 @@ void DocumentCanvas::setPointerIsEraser(bool eraser)
     emit toolChanged();
 }
 
-bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool eraser)
+bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool eraser,
+                                qreal timeSeconds)
 {
     if (!m_ink || m_layout.isEmpty())
         return false;
@@ -1135,7 +1171,7 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
     // начинаются, поэтому внутри штриха он не меняется.
     m_wet.begin(page, prototype, m_zoom);
     // Чернила складываются в координатах страницы, а не экрана.
-    m_wet.addPoint({viewToPage(page, viewPoint), pressure, FrameStats::nowNs() / 1e9});
+    m_wet.addPoint({viewToPage(page, viewPoint), pressure, inputTimeSeconds(timeSeconds)});
 
     if (m_frameStats)
         m_frameStats->markInput();
@@ -1144,7 +1180,7 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
     return true;
 }
 
-void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure)
+void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure, qreal timeSeconds)
 {
     // Начатый штрих доводится до конца тем же инструментом: нажатие кнопки на
     // корпусе посреди линии не должно превращать её в стирание.
@@ -1154,7 +1190,7 @@ void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure)
         return;
     }
 
-    m_wet.addPoint({viewToPage(m_wetPage, viewPoint), pressure, FrameStats::nowNs() / 1e9});
+    m_wet.addPoint({viewToPage(m_wetPage, viewPoint), pressure, inputTimeSeconds(timeSeconds)});
 
     if (m_frameStats)
         m_frameStats->markInput();
@@ -1339,12 +1375,12 @@ bool DocumentCanvas::handleTabletEvent(QTabletEvent *event)
 
     switch (event->type()) {
     case QEvent::TabletPress:
-        beginInkAt(position, pressure, m_pointerIsEraser);
+        beginInkAt(position, pressure, m_pointerIsEraser, eventTimeSeconds(event));
         event->accept();
         return true;
     case QEvent::TabletMove:
         if (m_stylusInContact) {
-            continueInkAt(position, pressure);
+            continueInkAt(position, pressure, eventTimeSeconds(event));
             event->accept();
             return true;
         }
@@ -1400,13 +1436,13 @@ bool DocumentCanvas::handleMouseEvent(QMouseEvent *event)
     case QEvent::MouseButtonPress:
         if (event->button() != Qt::LeftButton)
             return false; // нажатие одной лишь кнопки на корпусе штриха не начинает
-        beginInkAt(event->position(), intent.pressure, intent.eraser);
+        beginInkAt(event->position(), intent.pressure, intent.eraser, eventTimeSeconds(event));
         event->accept();
         return true;
     case QEvent::MouseMove:
         if (!m_stylusInContact || !intent.contact)
             return false;
-        continueInkAt(event->position(), intent.pressure);
+        continueInkAt(event->position(), intent.pressure, eventTimeSeconds(event));
         event->accept();
         return true;
     case QEvent::MouseButtonRelease:

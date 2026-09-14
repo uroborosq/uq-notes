@@ -4,13 +4,16 @@
 
 #include <QMouseEvent>
 #include <QPointingDevice>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QTouchEvent>
 
 #include "canvas/documentcanvas.h"
 #include "fixtures.h"
 #include "ink/inkdocument.h"
+#include "ink/stroketessellator.h"
 #include "pdf/pdfdocumentmodel.h"
+#include "storage/notestore.h"
 
 class TestCanvasInk : public QObject
 {
@@ -433,6 +436,177 @@ private slots:
         QCOMPARE(all.size(), 2);
         QCOMPARE(all[0].stroke.color, QColor("#ffc02828"));
         QCOMPARE(all[1].stroke.color, QColor(0x66, 0xf2, 0xd0, 0x24));
+    }
+
+    // rnote-grade-stroke-fidelity, задача 3.2: время точки берётся из события
+    // пера, а не из момента, когда холст успел его обработать.
+    void inkPointsTakeTimeFromTheEvent()
+    {
+        m_canvas.goToPage(0);
+        const QPointF from(420, 320);
+        const auto send = [this](QEvent::Type type, const QPointF &at, Qt::MouseButton button,
+                                 Qt::MouseButtons buttons, quint64 ms) {
+            QMouseEvent event(type, at, at, button, buttons, Qt::NoModifier, stylus());
+            event.setTimestamp(ms);
+            QCoreApplication::sendEvent(&m_canvas, &event);
+        };
+        const auto pathAt = [from](int i) {
+            return from + QPointF(i * 4.0, std::sin(i * 0.3) * 10.0);
+        };
+
+        // Метки времени нарочно далеки от часов приложения.
+        const quint64 startMs = 5000000;
+        const quint64 endMs = startMs + 40 * 5;
+        send(QEvent::MouseButtonPress, pathAt(0), Qt::LeftButton, Qt::LeftButton, startMs);
+        for (int i = 1; i <= 40; ++i)
+            send(QEvent::MouseMove, pathAt(i), Qt::NoButton, Qt::LeftButton, startMs + i * 5);
+        send(QEvent::MouseButtonRelease, pathAt(40), Qt::LeftButton, Qt::NoButton, endMs);
+
+        QCOMPARE(m_ink.strokeCount(), 1);
+        const QList<InkPoint> points = m_ink.allStrokes().first().stroke.points;
+        QVERIFY(points.size() > 2);
+        for (const InkPoint &point : points) {
+            QVERIFY2(point.timeSeconds >= startMs / 1000.0 - 1e-6
+                         && point.timeSeconds <= endMs / 1000.0 + 1e-6,
+                     qPrintable(QStringLiteral("время точки %1 не из событий [%2, %3]")
+                                    .arg(point.timeSeconds, 0, 'f', 4)
+                                    .arg(startMs / 1000.0, 0, 'f', 3)
+                                    .arg(endMs / 1000.0, 0, 'f', 3)));
+        }
+    }
+
+    // Сценарий «Неравномерная доставка событий»: те же отсчёты с теми же
+    // метками времени, поданные равномерно и пачками, дают один и тот же штрих.
+    void burstDeliveryGivesTheSameStroke()
+    {
+        m_canvas.goToPage(0);
+
+        struct Sample
+        {
+            QPointF at;
+            qreal pressure = 0.0;
+            qreal time = 0.0;
+        };
+        // Метки с разрешением в 1 мс, как на Wayland: при отсчётах через 0.8 мс
+        // у соседних метка местами совпадает. И один отсчёт повторён целиком.
+        QList<Sample> samples;
+        for (int i = 0; i < 240; ++i) {
+            samples.append({QPointF(380 + i * 0.5, 330 + 25 * std::sin(i * 0.05)),
+                            0.3 + 0.5 * std::abs(std::sin(i * 0.02)),
+                            7.0 + std::floor(i * 0.8) / 1000.0});
+        }
+        samples.insert(51, samples[50]);
+
+        const auto draw = [&](const QList<int> &bursts) {
+            m_ink.clear();
+            m_canvas.beginInkAt(samples[0].at, samples[0].pressure, false, samples[0].time);
+            int burst = 0;
+            int inBurst = 0;
+            for (int i = 1; i < samples.size(); ++i) {
+                m_canvas.continueInkAt(samples[i].at, samples[i].pressure, samples[i].time);
+                // Между пачками приложение занято чем-то другим.
+                if (++inBurst == bursts[burst % bursts.size()]) {
+                    QTest::qWait(2);
+                    inBurst = 0;
+                    ++burst;
+                }
+            }
+            m_canvas.endInk();
+            return m_ink.allStrokes().first().stroke.points;
+        };
+
+        const QList<InkPoint> uniform = draw({1});
+        const QList<InkPoint> bursty = draw({4, 7, 5, 8, 6});
+
+        QCOMPARE(bursty.size(), uniform.size());
+        for (int i = 0; i < uniform.size(); ++i) {
+            QVERIFY2(uniform[i].position == bursty[i].position
+                         && uniform[i].pressure == bursty[i].pressure,
+                     qPrintable(QStringLiteral("точка %1 разошлась").arg(i)));
+        }
+    }
+
+    // Задача 5.4, сценарий «Нанесённый штрих без предварительного участка»:
+    // штрих один и тот же после отрыва, после сохранения и перезагрузки
+    // заметки, после отмены и повтора и в контуре экспорта - и кончается в
+    // последней точке контакта, а не там, куда дотянулся провизорный хвост.
+    void finishedStrokeIsTheSameEverywhere()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString notePath = dir.filePath(QStringLiteral("stroke.uqn"));
+        NoteStore store;
+        QVERIFY(store.create(notePath, fixtures::textbook()));
+        store.attach(&m_ink);
+
+        // Быстрая дуга: провизорный хвост длинный до самого отрыва.
+        m_canvas.goToPage(0);
+        const QPointF center(450, 350);
+        qreal time = 11.0;
+        QPointF lastView;
+        for (int i = 0; i <= 60; ++i) {
+            lastView = center + QPointF(120.0 * std::cos(i * 0.06), 120.0 * std::sin(i * 0.06));
+            if (i == 0)
+                QVERIFY(m_canvas.beginInkAt(lastView, 0.6, false, time));
+            else
+                m_canvas.continueInkAt(lastView, 0.6, time);
+            time += 1.0 / 240.0;
+        }
+        m_canvas.endInk();
+
+        QCOMPARE(m_ink.strokeCount(), 1);
+        const Stroke drawn = m_ink.allStrokes().first().stroke;
+        const QPointF lastContact = m_canvas.viewToPage(drawn.page, lastView);
+        const QPointF drawnEnd = drawn.points.constLast().position;
+        QVERIFY2(std::hypot(drawnEnd.x() - lastContact.x(), drawnEnd.y() - lastContact.y()) < 1e-6,
+                 "штрих кончается не в точке отрыва");
+
+        // Файл хранит координаты во float, поэтому сравнение с допуском.
+        const auto samePoints = [](const QList<InkPoint> &a, const QList<InkPoint> &b,
+                                   qreal tolerance) {
+            if (a.size() != b.size())
+                return false;
+            for (int i = 0; i < a.size(); ++i) {
+                if (std::hypot(a[i].position.x() - b[i].position.x(),
+                               a[i].position.y() - b[i].position.y())
+                        > tolerance
+                    || std::abs(a[i].pressure - b[i].pressure) > 1e-4) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // Сохранение и перезагрузка.
+        QVERIFY(store.flush());
+        {
+            NoteStore reopened;
+            InkDocument restored;
+            QVERIFY(reopened.openNote(notePath));
+            QVERIFY(reopened.load(&restored));
+            QCOMPARE(restored.strokeCount(), 1);
+            QVERIFY2(samePoints(restored.allStrokes().first().stroke.points, drawn.points, 1e-3),
+                     "штрих из файла не совпал с нанесённым");
+        }
+
+        // Отмена и повтор.
+        m_ink.undo();
+        QCOMPARE(m_ink.strokeCount(), 0);
+        m_ink.redo();
+        QCOMPARE(m_ink.strokeCount(), 1);
+        QVERIFY2(samePoints(m_ink.allStrokes().first().stroke.points, drawn.points, 0.0),
+                 "штрих после отмены и повтора не совпал с нанесённым");
+
+        // Экспорт вписывает контур из тех же точек; его торец - точка отрыва.
+        StrokeTessellator tessellator;
+        tessellator.setWidth(drawn.width);
+        const QVector<StrokeTessellator::Vertex> strip = tessellator.tessellate(drawn.points);
+        QVERIFY(!tessellator.outline(drawn.points).isEmpty());
+        const QPointF capCenter((strip[strip.size() - 2].x + strip[strip.size() - 1].x) / 2.0,
+                                (strip[strip.size() - 2].y + strip[strip.size() - 1].y) / 2.0);
+        QVERIFY2(std::hypot(capCenter.x() - lastContact.x(), capCenter.y() - lastContact.y())
+                     < 1e-3,
+                 "торец контура экспорта не в точке отрыва");
     }
 
     // Задача 5.5: геометрия чернил кэшируется по страницам и вытесняется

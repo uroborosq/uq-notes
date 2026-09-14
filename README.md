@@ -10,10 +10,19 @@
 Arch Linux:
 
 ```
-pacman -S qt6-base qt6-declarative qt6-wayland qt6-webengine qpdf cmake
+pacman -S qt6-base qt6-declarative qt6-wayland qt6-webengine qpdf abseil-cpp cmake
 ```
 
 `qt6-webengine` нужен ради модуля QtPdf — он поставляется именно там.
+`abseil-cpp` нужен модели траектории штриха
+[ink-stroke-modeler](https://github.com/google/ink-stroke-modeler) — той же, что
+у rnote. Сама модель лежит подмодулем в `third_party/`, до первой сборки её надо
+получить:
+
+```
+git submodule update --init
+```
+
 Для тестов дополнительно: `poppler` (`pdftotext`, `pdftoppm`).
 
 ## Сборка и запуск
@@ -36,6 +45,11 @@ cmake --build build -j$(nproc)
 cd packaging && makepkg -f
 sudo pacman -U uq-notes-*.pkg.tar.zst
 ```
+
+Подмодуль `third_party/ink-stroke-modeler` должен быть получен до `makepkg`:
+пакет собирается из локального дерева и ничего не скачивает. Abseil пакет берёт
+системный и линкует динамически, поэтому после обновления `abseil-cpp` пакет
+нужно пересобрать.
 
 После установки `uq notes` появляется в меню приложений, а PDF и файлы `.uqn`
 можно открывать через «Открыть с помощью». Тип `application/x-uqnotes` объявлен
@@ -107,7 +121,7 @@ cd build && ctest --output-on-failure
 ```
 packaging/    иконка, ярлык, тип файла .uqn, PKGBUILD
 src/canvas/    раскладка документа, холст, зум и панорама, граф сцены
-src/ink/       фильтрация и ресемплинг траектории, тесселяция, модель чернил
+src/ink/       модель траектории пера (ink-stroke-modeler), нарезка сплайном, тесселяция, модель чернил
 src/pdf/       документ, асинхронный рендер страниц, оглавление
 src/storage/   формат заметки .uqn (SQLite в режиме WAL)
 src/export/    экспорт в плоский PDF (overlay + qpdf)

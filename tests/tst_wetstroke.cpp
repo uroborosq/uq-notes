@@ -129,6 +129,91 @@ private slots:
         QVERIFY(!stroke.isValid());
     }
 
+    // --- rnote-grade-stroke-fidelity, задача 5.2 --------------------------
+
+    // Сценарий «Кончик линии у пера»: торец полосы после каждого отсчёта стоит
+    // у последнего положения пера.
+    void stripEndFollowsThePenOnFastArc()
+    {
+        WetStroke wet;
+        wet.begin(0, prototype(3.0));
+        const QList<InkPoint> input =
+            reference::sampledAtSpeed(reference::circle(80.0, 1, QPointF(200, 200)), 1200.0, 240.0);
+
+        for (int i = 0; i < input.size(); ++i) {
+            wet.addPoint(input[i]);
+            if (wet.strip().size() < 4)
+                continue;
+            // Торец - пара вершин по нормали, его середина - конец линии.
+            const WetStroke::Vertex &a = wet.strip()[wet.strip().size() - 2];
+            const WetStroke::Vertex &b = wet.strip()[wet.strip().size() - 1];
+            const QPointF end((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+            const qreal lag = std::hypot(end.x() - input[i].position.x(),
+                                         end.y() - input[i].position.y());
+            QVERIFY2(lag <= 2.0,
+                     qPrintable(QStringLiteral("конец линии отстал на %1 на отсчёте %2")
+                                    .arg(lag)
+                                    .arg(i)));
+        }
+    }
+
+    // Сценарий «Резкая смена направления»: после разворота провизорная часть
+    // полосы не торчит дальше, чем прошло само перо.
+    void provisionalTailDoesNotOvershootReversal()
+    {
+        const qreal width = 3.0;
+        WetStroke wet;
+        wet.begin(0, prototype(width));
+        const QList<InkPoint> input = reference::sampledAtSpeed(
+            {QPointF(40, 100), QPointF(200, 100), QPointF(40, 100)}, 1000.0, 240.0);
+
+        int reversal = -1;
+        qreal reachX = 0.0; // докуда дошло перо и окончательная траектория
+        for (int i = 0; i < input.size(); ++i) {
+            wet.addPoint(input[i]);
+            reachX = qMax(reachX, input[i].position.x());
+            for (const InkPoint &point : wet.points())
+                reachX = qMax(reachX, point.position.x());
+            if (reversal < 0 && i > 0 && input[i].position.x() < input[i - 1].position.x())
+                reversal = i;
+            // Отсчёт разворота и следующий за ним.
+            if (reversal < 0 || i < reversal + 1)
+                continue;
+
+            for (int v = wet.settledVertexCount(); v < wet.strip().size(); ++v) {
+                QVERIFY2(wet.strip()[v].x <= reachX + width / 2.0 + 1.5,
+                         qPrintable(QStringLiteral("хвост торчит до x=%1 при пути до %2, отсчёт %3")
+                                        .arg(wet.strip()[v].x)
+                                        .arg(reachX)
+                                        .arg(i)));
+            }
+        }
+        QVERIFY(reversal > 0);
+    }
+
+    // Сценарий «Нанесённый штрих без предварительного участка»: завершённый
+    // штрих - это окончательные точки плюс дотяжка до отрыва, и ничего из
+    // провизорного хвоста.
+    void finishedStrokeHasNoPredictedPoints()
+    {
+        WetStroke wet;
+        wet.begin(0, prototype());
+        const QList<InkPoint> input =
+            reference::sampledAtSpeed(reference::straightLine(200, 300.0), 1500.0, 240.0);
+        for (const InkPoint &point : input)
+            wet.addPoint(point);
+
+        const QList<InkPoint> settled = wet.points();
+        QVERIFY2(!wet.provisionalPoints().isEmpty(), "эталон должен давать провизорный хвост");
+
+        const Stroke stroke = wet.finish();
+        QVERIFY(stroke.points.size() >= settled.size());
+        for (int i = 0; i < settled.size(); ++i)
+            QCOMPARE(stroke.points[i].position, settled[i].position);
+        QCOMPARE(stroke.points.constLast().position, input.constLast().position);
+        QVERIFY(wet.provisionalPoints().isEmpty());
+    }
+
     void geometryStaysFiniteThroughSharpTurns()
     {
         WetStroke wet;

@@ -56,6 +56,7 @@ target_link_libraries(uqnotes_core PUBLIC
     Qt6::Sql
     Qt6::Concurrent
     PkgConfig::QPDF
+    ink_stroke_modeler
 )
 
 qt_add_executable(uq-notes main.cpp)
