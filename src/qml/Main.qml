@@ -25,6 +25,12 @@ ApplicationWindow {
     ]
     // Готовые толщины: от волосяной для мелких пометок до маркерной.
     readonly property var penWidths: [0.4, 0.7, 1.0, 1.6, 2.6, 4.5]
+    // Устройства, которыми нажимаются элементы внутри областей навигации. В
+    // режиме «Только перо» касание экрана до них доходит - иначе оглавление не
+    // прокручивалось бы пальцем, - но нажатием не становится.
+    readonly property int tapDevices: touchGuard.penOnly
+        ? PointerDevice.AllDevices & ~PointerDevice.TouchScreen
+        : PointerDevice.AllDevices
 
     PdfDocumentModel {
         id: document
@@ -55,6 +61,16 @@ ApplicationWindow {
     // требование, а не режим отладки.
     FrameStats {
         id: frameStats
+        window: root
+    }
+
+    // Режим «Только перо»: пальцы не нажимают элементы окна, но остаются
+    // навигацией. Где навигация, решает свойство touchNavigation у ближайшего
+    // размеченного предка элемента под пальцем. Режим живёт только в этом
+    // объекте и нигде не сохраняется - каждый запуск начинается с выключенного.
+    TouchGuard {
+        id: touchGuard
+        objectName: "touchGuard"
         window: root
     }
 
@@ -174,6 +190,7 @@ ApplicationWindow {
                 onClicked: canvas.tool = DocumentCanvas.Pen
             }
             ToolButton {
+                objectName: "eraserButton"
                 text: qsTr("Ластик")
                 checkable: true
                 checked: canvas.tool === DocumentCanvas.Eraser
@@ -318,6 +335,18 @@ ApplicationWindow {
                 onClicked: ink.redo()
             }
             ToolSeparator {}
+            // Защита от случайных нажатий. Выключить режим пальцем нельзя: панель
+            // инструментов - не область навигации, и касание кнопки до неё не дойдёт.
+            ToolButton {
+                objectName: "penOnlyButton"
+                text: qsTr("Только перо")
+                checkable: true
+                checked: touchGuard.penOnly
+                ToolTip.text: qsTr("Пальцы и ладонь не нажимают кнопки, оглавление и вкладыши; сдвиг и масштаб пальцами работают")
+                ToolTip.visible: hovered
+                onClicked: touchGuard.penOnly = !touchGuard.penOnly
+            }
+            ToolSeparator {}
             ToolButton {
                 text: qsTr("Экспорт в PDF…")
                 enabled: document.ready && !exporter.busy
@@ -351,6 +380,8 @@ ApplicationWindow {
         DocumentCanvas {
             id: canvas
             objectName: "canvas"
+            // В режиме «Только перо» пальцы на холсте остаются навигацией.
+            property bool touchNavigation: true
             Layout.fillWidth: true
             Layout.fillHeight: true
             document: document
@@ -446,6 +477,8 @@ ApplicationWindow {
 
                 component InsertButton: Rectangle {
                     id: button
+                    // Нажимается пальцем только без режима «Только перо».
+                    property bool touchNavigation: false
                     property alias label: glyph.text
                     property string hint
                     signal activated()
@@ -497,6 +530,7 @@ ApplicationWindow {
                         // по нему не попасть, крупнее он закрывает текст.
                         Rectangle {
                             objectName: "insertAnchor"
+                            property bool touchNavigation: false
                             readonly property real size:
                                 Math.max(28, Math.min(112, 56 * canvas.zoom))
 
@@ -549,6 +583,7 @@ ApplicationWindow {
                         // стоит на месте, минимальный размер зажимает холст.
                         Rectangle {
                             objectName: "insertResize"
+                            property bool touchNavigation: false
                             visible: insertControls.open
                             width: 22
                             height: 22
@@ -640,6 +675,9 @@ ApplicationWindow {
 
                 TreeView {
                     id: outlineView
+                    // Прокрутка пальцем - навигация и в режиме «Только перо»;
+                    // пункты при этом пальцем не нажимаются (tapDevices).
+                    property bool touchNavigation: true
                     visible: outline.hasOutline
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -694,6 +732,7 @@ ApplicationWindow {
                             text: entry.expanded ? "▾" : "▸"
 
                             TapHandler {
+                                acceptedDevices: root.tapDevices
                                 onTapped: outlineView.toggleExpanded(entry.row)
                             }
                         }
@@ -708,6 +747,7 @@ ApplicationWindow {
                             color: outline.isReachable(entry.modelIndex) ? "#d8d8e2" : "#8a6a6a"
 
                             TapHandler {
+                                acceptedDevices: root.tapDevices
                                 onTapped: root.goToOutlineEntry(entry.modelIndex)
                             }
                         }

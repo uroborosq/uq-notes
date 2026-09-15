@@ -28,6 +28,8 @@ qt_add_qml_module(uqnotes_core
         ink/wetstroke.h
         export/noteexporter.cpp
         export/noteexporter.h
+        input/touchguard.cpp
+        input/touchguard.h
         storage/notestore.cpp
         storage/notestore.h
         pdf/outlinenavigator.cpp
@@ -44,7 +46,7 @@ qt_add_qml_module(uqnotes_core
 
 # Генератор регистрации QML-типов ищет заголовки по короткому имени, поэтому
 # каждая папка модуля попадает в путь включения.
-set(UQNOTES_MODULE_DIRS canvas export ink pdf perf storage)
+set(UQNOTES_MODULE_DIRS canvas export ink input pdf perf storage)
 target_include_directories(uqnotes_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 foreach(dir IN LISTS UQNOTES_MODULE_DIRS)
     target_include_directories(uqnotes_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/${dir})
