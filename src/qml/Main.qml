@@ -348,110 +348,6 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        Rectangle {
-            Layout.fillHeight: true
-            Layout.preferredWidth: 300
-            visible: root.sidebarVisible && document.ready
-            color: "#1f1f27"
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 8
-                spacing: 6
-
-                Label {
-                    text: qsTr("Оглавление")
-                    color: "#9a9aa8"
-                    font.pixelSize: 12
-                }
-
-                // Сценарий «Документ без закладок».
-                Label {
-                    visible: !outline.hasOutline
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    color: "#6e6e80"
-                    text: qsTr("В этом документе нет оглавления.")
-                }
-
-                TreeView {
-                    id: outlineView
-                    visible: outline.hasOutline
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: outline.model
-
-                    // Подсветка текущего раздела и раскрытие его родителей при
-                    // прокрутке документа.
-                    Connections {
-                        target: outline
-                        function onCurrentChanged() {
-                            if (!outline.currentIndex.valid)
-                                return
-                            outlineView.expandToIndex(outline.currentIndex)
-                        }
-                    }
-
-                    delegate: Item {
-                        id: entry
-
-                        required property int depth
-                        required property bool expanded
-                        required property bool hasChildren
-                        required property int row
-                        required property int column
-                        required property string title
-
-                        // В делегате TreeView `index` - это порядковый номер,
-                        // а не QModelIndex; настоящий индекс берётся у вида.
-                        readonly property var modelIndex: outlineView.index(row, column)
-
-                        implicitWidth: outlineView.width
-                        implicitHeight: 26
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 3
-                            // Подсветка текущего раздела: пункт, в который
-                            // попадает страница, которую сейчас читают.
-                            color: outline.currentIndex, outline.isCurrent(entry.modelIndex)
-                                   ? "#33507a" : "transparent"
-                        }
-
-                        Label {
-                            id: twisty
-                            x: entry.depth * 16
-                            width: 16
-                            anchors.verticalCenter: parent.verticalCenter
-                            horizontalAlignment: Text.AlignHCenter
-                            visible: entry.hasChildren
-                            color: "#8a8a9a"
-                            text: entry.expanded ? "▾" : "▸"
-
-                            TapHandler {
-                                onTapped: outlineView.toggleExpanded(entry.row)
-                            }
-                        }
-
-                        Label {
-                            anchors.verticalCenter: parent.verticalCenter
-                            x: twisty.x + 18
-                            width: outlineView.width - x - 6
-                            elide: Text.ElideRight
-                            text: entry.title
-                            // Пункт, ведущий в никуда, видно сразу.
-                            color: outline.isReachable(entry.modelIndex) ? "#d8d8e2" : "#8a6a6a"
-
-                            TapHandler {
-                                onTapped: root.goToOutlineEntry(entry.modelIndex)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         DocumentCanvas {
             id: canvas
             objectName: "canvas"
@@ -709,6 +605,113 @@ ApplicationWindow {
                     canvas.panBy(Qt.point(centroid.position.x - last.x,
                                           centroid.position.y - last.y))
                     last = centroid.position
+                }
+            }
+        }
+
+        // Оглавление справа: пишут левой рукой, и у левого края панель
+        // оказывается под ладонью.
+        Rectangle {
+            objectName: "outlinePanel"
+            Layout.fillHeight: true
+            Layout.preferredWidth: 300
+            visible: root.sidebarVisible && document.ready
+            color: "#1f1f27"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 6
+
+                Label {
+                    text: qsTr("Оглавление")
+                    color: "#9a9aa8"
+                    font.pixelSize: 12
+                }
+
+                // Сценарий «Документ без закладок».
+                Label {
+                    visible: !outline.hasOutline
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: "#6e6e80"
+                    text: qsTr("В этом документе нет оглавления.")
+                }
+
+                TreeView {
+                    id: outlineView
+                    visible: outline.hasOutline
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: outline.model
+
+                    // Подсветка текущего раздела и раскрытие его родителей при
+                    // прокрутке документа.
+                    Connections {
+                        target: outline
+                        function onCurrentChanged() {
+                            if (!outline.currentIndex.valid)
+                                return
+                            outlineView.expandToIndex(outline.currentIndex)
+                        }
+                    }
+
+                    delegate: Item {
+                        id: entry
+
+                        required property int depth
+                        required property bool expanded
+                        required property bool hasChildren
+                        required property int row
+                        required property int column
+                        required property string title
+
+                        // В делегате TreeView `index` - это порядковый номер,
+                        // а не QModelIndex; настоящий индекс берётся у вида.
+                        readonly property var modelIndex: outlineView.index(row, column)
+
+                        implicitWidth: outlineView.width
+                        implicitHeight: 26
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 3
+                            // Подсветка текущего раздела: пункт, в который
+                            // попадает страница, которую сейчас читают.
+                            color: outline.currentIndex, outline.isCurrent(entry.modelIndex)
+                                   ? "#33507a" : "transparent"
+                        }
+
+                        Label {
+                            id: twisty
+                            x: entry.depth * 16
+                            width: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            visible: entry.hasChildren
+                            color: "#8a8a9a"
+                            text: entry.expanded ? "▾" : "▸"
+
+                            TapHandler {
+                                onTapped: outlineView.toggleExpanded(entry.row)
+                            }
+                        }
+
+                        Label {
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: twisty.x + 18
+                            width: outlineView.width - x - 6
+                            elide: Text.ElideRight
+                            text: entry.title
+                            // Пункт, ведущий в никуда, видно сразу.
+                            color: outline.isReachable(entry.modelIndex) ? "#d8d8e2" : "#8a6a6a"
+
+                            TapHandler {
+                                onTapped: root.goToOutlineEntry(entry.modelIndex)
+                            }
+                        }
+                    }
                 }
             }
         }
