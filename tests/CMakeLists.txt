@@ -61,3 +61,11 @@ target_compile_definitions(tst_crashrecovery PRIVATE
 
 uq_add_test(tst_notestore tst_notestore.cpp)
 uq_add_test(tst_export tst_export.cpp)
+uq_add_test(tst_idlepower tst_idlepower.cpp)
+
+# Единственное исключение из правила «тесты не открывают окон»: покой в простое
+# измеряется по кадрам, а под offscreen цикл рендера крутится вхолостую всегда
+# и покой там неотличим от петли. Тест сам пропускается, если кадры не
+# наблюдаемы, поэтому без сессии он не краснеет, а сообщает SKIP.
+uq_add_test(tst_idleframes tst_idleframes.cpp)
+set_tests_properties(tst_idleframes PROPERTIES ENVIRONMENT "")

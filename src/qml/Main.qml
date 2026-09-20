@@ -878,31 +878,54 @@ ApplicationWindow {
         }
     }
 
-    Rectangle {
+    // Индикатор экспорта живёт только на время экспорта. Как и сводка кадров,
+    // он не прячется, а не создаётся: ProgressBar, созданный и невидимый,
+    // пересчитывает привязки бесконечно и держит окно перерисовывающимся
+    // (design.md, D1).
+    Loader {
+        active: exporter.busy
         anchors.centerIn: parent
-        width: 360
-        height: 110
-        radius: 8
-        color: "#242430"
-        border.color: "#3d3d4e"
-        visible: exporter.busy
 
-        ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: 18
-            spacing: 12
+        sourceComponent: Rectangle {
+            objectName: "exportProgressPanel"
+            width: 360
+            height: 110
+            radius: 8
+            color: "#242430"
+            border.color: "#3d3d4e"
 
-            Label {
-                Layout.fillWidth: true
-                color: "#e2e2ea"
-                elide: Text.ElideMiddle
-                text: exporter.statusText
-            }
-            ProgressBar {
-                Layout.fillWidth: true
-                from: 0
-                to: 1
-                value: exporter.progress
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 18
+                spacing: 12
+
+                Label {
+                    Layout.fillWidth: true
+                    color: "#e2e2ea"
+                    elide: Text.ElideMiddle
+                    text: exporter.statusText
+                }
+                // Полоса рисуется вручную, а не берётся у стиля: ProgressBar
+                // из Breeze держит бесконечную анимацию, запущенную
+                // безусловно, и жжёт процессор всё время, пока существует, -
+                // а нужен он здесь ровно тогда, когда процессор занят
+                // экспортом (design.md, D5). Панель и так нарисована
+                // полностью своими цветами, так что системным тут был один
+                // этот элемент.
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 6
+                    radius: height / 2
+                    color: "#33333f"
+
+                    Rectangle {
+                        objectName: "exportProgressFill"
+                        width: parent.width * Math.max(0, Math.min(1, exporter.progress))
+                        height: parent.height
+                        radius: parent.radius
+                        color: "#3c5a86"
+                    }
+                }
             }
         }
     }
@@ -914,26 +937,34 @@ ApplicationWindow {
         onAccepted: root.openPath(document.toLocalPath(selectedFile))
     }
 
-    // Сводка по кадрам показывается только когда замер запрошен явно
-    // переменной окружения UQ_FRAME_LOG.
-    Rectangle {
-        visible: frameStats.logging
+    // Сводка по кадрам нужна, только когда замер запрошен явно переменной
+    // окружения UQ_FRAME_LOG, - поэтому она не прячется, а не создаётся.
+    // Спрятать недостаточно: привязки невидимого элемента вычисляются как
+    // обычно, а эта сводка меняется на каждом кадре и меняет собственную
+    // ширину, то есть держала бы сцену грязной вечно. В простое кадров быть
+    // не должно (specs/idle-power).
+    Loader {
+        active: frameStats.logging
         anchors { left: parent.left; bottom: parent.bottom; margins: 10 }
-        width: hudText.implicitWidth + 20
-        height: hudText.implicitHeight + 14
-        radius: 4
-        color: "#cc000000"
 
-        Text {
-            id: hudText
-            anchors.centerIn: parent
-            color: frameStats.longFrameCount > 0 ? "#ff9f6a" : "#9de5a0"
-            font.family: "monospace"
-            font.pixelSize: 11
-            text: frameStats.summary + "\ntextures: " + canvas.liveTextureCount
-                  + " / retained: " + canvas.retainedPageCount
-                  + " / placeholders: " + canvas.placeholderPageCount
-                  + " / ink pages: " + canvas.inkGeometryPageCount
+        sourceComponent: Rectangle {
+            objectName: "frameStatsHud"
+            width: hudText.implicitWidth + 20
+            height: hudText.implicitHeight + 14
+            radius: 4
+            color: "#cc000000"
+
+            Text {
+                id: hudText
+                anchors.centerIn: parent
+                color: frameStats.longFrameCount > 0 ? "#ff9f6a" : "#9de5a0"
+                font.family: "monospace"
+                font.pixelSize: 11
+                text: frameStats.summary + "\ntextures: " + canvas.liveTextureCount
+                      + " / retained: " + canvas.retainedPageCount
+                      + " / placeholders: " + canvas.placeholderPageCount
+                      + " / ink pages: " + canvas.inkGeometryPageCount
+            }
         }
     }
 }

@@ -160,7 +160,13 @@ void FrameStats::onFrameSwapped()
     }
     m_lastSwapNs = now;
 
-    emit statsChanged();
+    // Показатели собираются всегда - это дёшево и нужно markInput(), - но
+    // будить на каждом кадре QML нельзя: пересчёт привязок сводки меняет её
+    // ширину, окно снова становится грязным, и приложение никогда не приходит
+    // в покой (specs/idle-power). Сводку никто не читает, пока замер не
+    // запрошен явно, так что и сигнала тогда быть не должно.
+    if (m_logTimer)
+        emit statsChanged();
 }
 
 void FrameStats::ensureSorted() const
