@@ -634,7 +634,7 @@ private slots:
         {
             RawNote raw(note);
             QCOMPARE(raw.column(QStringLiteral("SELECT value FROM meta WHERE key = 'schema'")),
-                     QVariantList({QStringLiteral("2")}));
+                     QVariantList({QStringLiteral("3")}));
         }
 
         InkDocument ink;
@@ -832,6 +832,176 @@ private slots:
             QStringLiteral("SELECT page FROM (SELECT id, page, tool, color, width, points "
                            "FROM stroke ORDER BY id)"));
         QCOMPARE(pages, QVariantList({0, 1}));
+    }
+
+    // --- ink-beauty-pass, D3: закон толщины хранится со штрихом -----------
+
+    // Сценарий «Штрих после повторного открытия»: закон толщины переживает
+    // запись - и у штриха страницы, и у штриха вкладыша.
+    void roundTripsStrokeStyle()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("ac.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        quint64 legacy = 0;
+        quint64 tapered = 0;
+        quint64 insertStroke = 0;
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.create(note, pdf));
+            store.attach(&ink);
+            legacy = ink.addStroke(lineOnPage(0));
+            Stroke stroke = lineOnPage(0, 30.0);
+            stroke.style = StrokeStyle::Tapered;
+            tapered = ink.addStroke(stroke);
+            const quint64 insert = ink.addInsert(0, QRectF(0, 0, 200, 140));
+            stroke.insert = insert;
+            insertStroke = ink.addStroke(stroke);
+            QVERIFY(store.flush());
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+        QHash<quint64, StrokeStyle> styles;
+        for (const InkDocument::Record &record : ink.allStrokes())
+            styles.insert(record.id, record.stroke.style);
+        for (const InkDocument::Record &record : ink.allInsertStrokes())
+            styles.insert(record.id, record.stroke.style);
+        QCOMPARE(styles.size(), 3);
+        QCOMPARE(styles.value(legacy), StrokeStyle::Legacy);
+        QCOMPARE(styles.value(tapered), StrokeStyle::Tapered);
+        QCOMPARE(styles.value(insertStroke), StrokeStyle::Tapered);
+    }
+
+    // Сценарий «Заметка прежней версии»: файл схемы 2 получает колонку style
+    // в обеих таблицах штрихов, его штрихи читаются законом Legacy, а новый
+    // штрих сохраняет свой закон.
+    void migratesSchemaVersionTwoNote()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("ad.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        {
+            RawNote raw(note);
+            QVERIFY(raw.isOpen());
+            // Схема ровно такая, какой её создавала версия 2.
+            const QStringList schema = {
+                QStringLiteral("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"),
+                QStringLiteral("CREATE TABLE stroke (id INTEGER PRIMARY KEY, page INTEGER NOT NULL, "
+                               "tool INTEGER NOT NULL, color INTEGER NOT NULL, width REAL NOT NULL, "
+                               "points BLOB NOT NULL)"),
+                QStringLiteral("CREATE INDEX stroke_page ON stroke(page)"),
+                QStringLiteral("CREATE TABLE view_state (id INTEGER PRIMARY KEY CHECK (id = 1), "
+                               "page INTEGER NOT NULL, zoom REAL NOT NULL, page_mode INTEGER NOT NULL, "
+                               "origin_x REAL NOT NULL, origin_y REAL NOT NULL)"),
+                QStringLiteral("CREATE TABLE ink_insert (id INTEGER PRIMARY KEY, page INTEGER NOT NULL, "
+                               "x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, "
+                               "height REAL NOT NULL, open INTEGER NOT NULL)"),
+                QStringLiteral("CREATE TABLE insert_stroke (id INTEGER PRIMARY KEY, "
+                               "insert_id INTEGER NOT NULL, tool INTEGER NOT NULL, "
+                               "color INTEGER NOT NULL, width REAL NOT NULL, points BLOB NOT NULL)"),
+                QStringLiteral("CREATE INDEX insert_stroke_insert ON insert_stroke(insert_id)"),
+            };
+            for (const QString &statement : schema)
+                QVERIFY(raw.exec(statement));
+            const QList<QPair<QString, QString>> metas = {
+                {QStringLiteral("schema"), QStringLiteral("2")},
+                {QStringLiteral("source_path"), QFileInfo(pdf).absoluteFilePath()},
+                {QStringLiteral("source_size"), QString::number(QFileInfo(pdf).size())},
+                {QStringLiteral("source_hash"), NoteStore::hashOfFile(pdf)},
+            };
+            for (const auto &[key, value] : metas) {
+                QVERIFY(raw.exec(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?)"),
+                                 {key, value}));
+            }
+            QVERIFY(raw.exec(QStringLiteral("INSERT INTO stroke(id, page, tool, color, width, "
+                                            "points) VALUES(1, 0, 0, ?, 2.0, ?)"),
+                             {QColor(Qt::black).rgba(), packedLine(12)}));
+            QVERIFY(raw.exec(QStringLiteral("INSERT INTO ink_insert(id, page, x, y, width, height, "
+                                            "open) VALUES(1, 0, 30.0, 40.0, 200.0, 140.0, 1)")));
+            QVERIFY(raw.exec(QStringLiteral("INSERT INTO insert_stroke(id, insert_id, tool, color, "
+                                            "width, points) VALUES(2, 1, 0, ?, 2.0, ?)"),
+                             {QColor(Qt::black).rgba(), packedLine(12)}));
+        }
+
+        quint64 added = 0;
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY2(store.openNote(note), qPrintable(store.errorString()));
+            QVERIFY2(store.load(&ink), qPrintable(store.errorString()));
+            QCOMPARE(ink.allStrokes().size(), 1);
+            QCOMPARE(ink.allStrokes().first().stroke.style, StrokeStyle::Legacy);
+            QCOMPARE(ink.strokesInInsert(1).size(), 1);
+            QCOMPARE(ink.strokesInInsert(1).first().stroke.style, StrokeStyle::Legacy);
+
+            store.attach(&ink);
+            Stroke stroke = lineOnPage(1);
+            stroke.style = StrokeStyle::Tapered;
+            added = ink.addStroke(stroke);
+            QVERIFY(store.flush());
+        }
+
+        {
+            RawNote raw(note);
+            QCOMPARE(raw.column(QStringLiteral("SELECT value FROM meta WHERE key = 'schema'")),
+                     QVariantList({QStringLiteral("3")}));
+            for (const QString &table : {QStringLiteral("stroke"), QStringLiteral("insert_stroke")}) {
+                QVERIFY2(raw.column(QStringLiteral("SELECT name FROM pragma_table_info('%1')").arg(table))
+                             .contains(QStringLiteral("style")),
+                         qPrintable(table));
+            }
+            QCOMPARE(raw.column(QStringLiteral("SELECT style FROM stroke ORDER BY id")),
+                     QVariantList({0, 1}));
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+        for (const InkDocument::Record &record : ink.allStrokes())
+            QCOMPARE(record.stroke.style, record.id == added ? StrokeStyle::Tapered : StrokeStyle::Legacy);
+    }
+
+    // Сценарий «Открытие прежней версией приложения»: версия 0.7 читает stroke
+    // своим запросом и пишет строки без колонки style. Файл схемы 3 принимает
+    // и то и другое, а строка без style читается законом Legacy.
+    void previousVersionQueriesWorkOnSchemaThree()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("ae.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+        {
+            InkDocument ink;
+            NoteStore store;
+            QVERIFY(store.create(note, pdf));
+            store.attach(&ink);
+            Stroke stroke = lineOnPage(0);
+            stroke.style = StrokeStyle::Tapered;
+            ink.addStroke(stroke);
+            QVERIFY(store.flush());
+        }
+
+        {
+            RawNote raw(note);
+            QCOMPARE(raw.column(QStringLiteral("SELECT page FROM (SELECT id, page, tool, color, "
+                                               "width, points FROM stroke ORDER BY id)")),
+                     QVariantList({0}));
+            QVERIFY(raw.exec(QStringLiteral("INSERT INTO stroke(id, page, tool, color, width, points) "
+                                            "VALUES(?, ?, ?, ?, ?, ?)"),
+                             {7, 2, 0, QColor(Qt::black).rgba(), 2.0, packedLine(12)}));
+        }
+
+        InkDocument ink;
+        NoteStore store;
+        QVERIFY(store.openNote(note));
+        QVERIFY(store.load(&ink));
+        QCOMPARE(ink.allStrokes().size(), 2);
+        QCOMPARE(ink.allStrokes()[0].stroke.style, StrokeStyle::Tapered);
+        QCOMPARE(ink.allStrokes()[1].id, quint64(7));
+        QCOMPARE(ink.allStrokes()[1].stroke.style, StrokeStyle::Legacy);
     }
 
     // Задача 2.6, сценарий «Вкладыш на исчезнувшей странице».

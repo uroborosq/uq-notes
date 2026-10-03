@@ -14,7 +14,12 @@ namespace {
 // Версия 2 добавила вкладыши. Их таблицы создаются через CREATE TABLE IF NOT
 // EXISTS, как и прежние, поэтому файл первой версии получает их при открытии
 // без отдельной миграции (design.md, D8).
-constexpr int kSchemaVersion = 2;
+//
+// Версия 3 добавила закон толщины штриха - колонку style в stroke и
+// insert_stroke (ink-beauty-pass, design.md, D3). Колонку в существующую
+// таблицу CREATE TABLE IF NOT EXISTS не добавит, поэтому для неё миграция
+// явная: ensureColumn при каждом открытии.
+constexpr int kSchemaVersion = 3;
 // Автосохранение раз в пять секунд: спека разрешает терять не больше тридцати,
 // и запас нужен на то, чтобы одно пропущенное срабатывание ничего не стоило.
 constexpr int kDefaultAutosaveMs = 5000;
@@ -47,6 +52,13 @@ QList<InkPoint> unpackPoints(const QByteArray &blob)
         points.append(point);
     }
     return points;
+}
+
+// Закон толщины из файла. Неизвестное значение - от будущей версии - читается
+// как Legacy: так же прежние версии читают файл, о колонке не зная.
+StrokeStyle styleFromFile(int value)
+{
+    return value == int(StrokeStyle::Tapered) ? StrokeStyle::Tapered : StrokeStyle::Legacy;
 }
 
 } // namespace
@@ -218,7 +230,8 @@ bool NoteStore::initializeSchema()
                        "  tool INTEGER NOT NULL,"
                        "  color INTEGER NOT NULL,"
                        "  width REAL NOT NULL,"
-                       "  points BLOB NOT NULL)"),
+                       "  points BLOB NOT NULL,"
+                       "  style INTEGER NOT NULL DEFAULT 0)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS stroke_page ON stroke(page)"),
         QStringLiteral("CREATE TABLE IF NOT EXISTS view_state ("
                        "  id INTEGER PRIMARY KEY CHECK (id = 1),"
@@ -244,7 +257,8 @@ bool NoteStore::initializeSchema()
                        "  tool INTEGER NOT NULL,"
                        "  color INTEGER NOT NULL,"
                        "  width REAL NOT NULL,"
-                       "  points BLOB NOT NULL)"),
+                       "  points BLOB NOT NULL,"
+                       "  style INTEGER NOT NULL DEFAULT 0)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS insert_stroke_insert "
                        "ON insert_stroke(insert_id)"),
     };
@@ -253,6 +267,34 @@ bool NoteStore::initializeSchema()
             m_errorString = query.lastError().text();
             return false;
         }
+    }
+
+    // Схема 3. DEFAULT 0 - закон Legacy: им читаются все штрихи файла прежней
+    // схемы, и такие же строки пишет прежняя версия приложения, которая о
+    // колонке не знает (сценарий «Открытие прежней версией приложения»).
+    for (const QString &table : {QStringLiteral("stroke"), QStringLiteral("insert_stroke")}) {
+        if (!ensureColumn(table, QStringLiteral("style"),
+                          QStringLiteral("INTEGER NOT NULL DEFAULT 0")))
+            return false;
+    }
+    return true;
+}
+
+bool NoteStore::ensureColumn(const QString &table, const QString &column,
+                             const QString &definition)
+{
+    QSqlQuery query(m_database);
+    if (!query.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table))) {
+        m_errorString = query.lastError().text();
+        return false;
+    }
+    while (query.next()) {
+        if (query.value(1).toString() == column) // колонки: cid, name, type, ...
+            return true;
+    }
+    if (!query.exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 %3").arg(table, column, definition))) {
+        m_errorString = query.lastError().text();
+        return false;
     }
     return true;
 }
@@ -365,11 +407,12 @@ bool NoteStore::load(InkDocument *ink)
         record->stroke.color = QColor::fromRgba(query.value(3).toUInt());
         record->stroke.width = query.value(4).toReal();
         record->stroke.points = unpackPoints(query.value(5).toByteArray());
+        record->stroke.style = styleFromFile(query.value(6).toInt());
     };
 
     QSqlQuery query(m_database);
     if (!query.exec(QStringLiteral(
-            "SELECT id, page, tool, color, width, points FROM stroke ORDER BY id"))) {
+            "SELECT id, page, tool, color, width, points, style FROM stroke ORDER BY id"))) {
         m_errorString = query.lastError().text();
         return false;
     }
@@ -411,7 +454,8 @@ bool NoteStore::load(InkDocument *ink)
 
     QSqlQuery insertStrokeQuery(m_database);
     if (!insertStrokeQuery.exec(QStringLiteral(
-            "SELECT id, insert_id, tool, color, width, points FROM insert_stroke ORDER BY id"))) {
+            "SELECT id, insert_id, tool, color, width, points, style FROM insert_stroke "
+            "ORDER BY id"))) {
         m_errorString = insertStrokeQuery.lastError().text();
         return false;
     }
@@ -494,23 +538,27 @@ bool NoteStore::writeStroke(const InkDocument::Record &record)
 {
     return exec(
         QStringLiteral(
-            "INSERT INTO stroke(id, page, tool, color, width, points) VALUES(?, ?, ?, ?, ?, ?) "
+            "INSERT INTO stroke(id, page, tool, color, width, points, style) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET page=excluded.page, tool=excluded.tool, "
-            "color=excluded.color, width=excluded.width, points=excluded.points"),
+            "color=excluded.color, width=excluded.width, points=excluded.points, "
+            "style=excluded.style"),
         {qulonglong(record.id), record.stroke.page, int(record.stroke.tool),
-         record.stroke.color.rgba(), record.stroke.width, packPoints(record.stroke.points)});
+         record.stroke.color.rgba(), record.stroke.width, packPoints(record.stroke.points),
+         int(record.stroke.style)});
 }
 
 bool NoteStore::writeInsertStroke(const InkDocument::Record &record)
 {
     return exec(
-        QStringLiteral("INSERT INTO insert_stroke(id, insert_id, tool, color, width, points) "
-                       "VALUES(?, ?, ?, ?, ?, ?) "
+        QStringLiteral("INSERT INTO insert_stroke(id, insert_id, tool, color, width, points, "
+                       "style) VALUES(?, ?, ?, ?, ?, ?, ?) "
                        "ON CONFLICT(id) DO UPDATE SET insert_id=excluded.insert_id, "
                        "tool=excluded.tool, color=excluded.color, width=excluded.width, "
-                       "points=excluded.points"),
+                       "points=excluded.points, style=excluded.style"),
         {qulonglong(record.id), qulonglong(record.stroke.insert), int(record.stroke.tool),
-         record.stroke.color.rgba(), record.stroke.width, packPoints(record.stroke.points)});
+         record.stroke.color.rgba(), record.stroke.width, packPoints(record.stroke.points),
+         int(record.stroke.style)});
 }
 
 bool NoteStore::writeInsert(const InkInsert &insert)

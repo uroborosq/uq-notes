@@ -131,6 +131,8 @@ signals:
 
 private:
     bool initializeSchema();
+    // Добавляет колонку, если её в таблице нет: миграция файла прежней схемы.
+    bool ensureColumn(const QString &table, const QString &column, const QString &definition);
     bool setMeta(const QString &key, const QString &value);
     QString meta(const QString &key) const;
     bool writeStroke(const InkDocument::Record &record);

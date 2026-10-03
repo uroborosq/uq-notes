@@ -2779,7 +2779,7 @@ Tapered 0.710.
 
 ### 4b. Хранение: схема 3
 
-- [ ] 4.12 **Тесты хранения и миграции в `tests/tst_notestore.cpp`.**
+- [x] 4.12 **Тесты хранения и миграции в `tests/tst_notestore.cpp`.**
   Файлы старой схемы тесты уже строят напрямую через `RawNote` (см.
   `opensSchemaVersionOneNote`); тест миграции 2 → 3 делает так же, со схемой
   ровно как в нынешнем `NoteStore::initializeSchema()`.
@@ -2966,7 +2966,7 @@ Tapered 0.710.
 
   ```
 
-- [ ] 4.13 **Прогон: четыре теста падают.**
+- [x] 4.13 **Прогон: четыре теста падают.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_notestore$' --output-on-failure`
   Ожидается `4 failed`:
   - `opensSchemaVersionOneNote` - «Compared lists differ at index 0» (схема "2");
@@ -2975,7 +2975,7 @@ Tapered 0.710.
   - `migratesSchemaVersionTwoNote` - «Compared lists differ at index 0» (схема "2");
   - `previousVersionQueriesWorkOnSchemaThree` - «Compared values are not the same».
 
-- [ ] 4.14 **Объявление миграции колонки.** `src/storage/notestore.h`, секция
+- [x] 4.14 **Объявление миграции колонки.** `src/storage/notestore.h`, секция
   `private:`, после `    bool initializeSchema();` вставить:
 
   ```cpp
@@ -2983,7 +2983,7 @@ Tapered 0.710.
       bool ensureColumn(const QString &table, const QString &column, const QString &definition);
   ```
 
-- [ ] 4.15 **Схема 3 в `src/storage/notestore.cpp`.** Шесть правок:
+- [x] 4.15 **Схема 3 в `src/storage/notestore.cpp`.** Шесть правок:
 
   1. Комментарий и константу версии (строки 14-17) заменить на:
 
@@ -3110,13 +3110,13 @@ Tapered 0.710.
   `openNote` менять не нужно: он уже поднимает `meta.schema` до
   `kSchemaVersion`, если она ниже, и не опускает версию файла из будущего.
 
-- [ ] 4.16 **Прогон.**
+- [x] 4.16 **Прогон.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_(notestore|crashrecovery)$' --output-on-failure`
   Ожидается `100% tests passed, 0 tests failed out of 2`; в выводе
   `tst_notestore` - `Totals: 28 passed, 0 failed`. `tst_crashrecovery` пишет
   заметку из дочернего процесса и открывает её - схема 3 там создаётся с нуля.
 
-- [ ] 4.17 **Коммит.**
+- [x] 4.17 **Коммит.**
 
   ```sh
   git add src/storage/notestore.h src/storage/notestore.cpp tests/tst_notestore.cpp
