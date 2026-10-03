@@ -3,7 +3,8 @@
 # Собирается отдельно от приложения (быстро, без QML/PDF):
 #   cmake -S tools/stroke-lab -B build-lab -G Ninja -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build-lab
-# или вместе с приложением: -DUQ_BUILD_STROKE_LAB=ON в корневом CMake.
+# или вместе с приложением: -DUQ_BUILD_STROKE_LAB=ON в корневом CMake. В пакет
+# не входит: install() здесь нет.
 cmake_minimum_required(VERSION 3.21)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -36,8 +37,11 @@ file(GLOB STROKE_LAB_VARIANTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/vari
 add_executable(stroke-lab
     main.cpp
     corpus.cpp
+    endcheck.cpp
     metrics.cpp
     raster.cpp
+    aaraster.cpp
+    rastermetrics.cpp
     render.cpp
     ${STROKE_LAB_VARIANTS}
 )
@@ -47,3 +51,10 @@ target_include_directories(stroke-lab PRIVATE
 )
 target_link_libraries(stroke-lab PRIVATE stroke_lab_ink Qt6::Core Qt6::Gui)
 set_target_properties(stroke-lab PROPERTIES AUTOMOC OFF)
+
+# Качество кромки тонкой линии: MSAA 4x/8x/16x против аналитического покрытия
+# (exp/dry-refine). От вариантов не зависит.
+add_executable(stroke-lab-aabench aabench.cpp raster.cpp)
+target_include_directories(stroke-lab-aabench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(stroke-lab-aabench PRIVATE Qt6::Core Qt6::Gui)
+set_target_properties(stroke-lab-aabench PROPERTIES AUTOMOC OFF)

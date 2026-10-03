@@ -22,6 +22,14 @@ SamplePattern SamplePattern::grid(int n)
     return p;
 }
 
+SamplePattern SamplePattern::lattice64()
+{
+    SamplePattern p;
+    for (int i = 0; i < 64; ++i)
+        p.offsets.emplace_back((i + 0.5) / 64.0, ((19 * i) % 64 + 0.5) / 64.0);
+    return p;
+}
+
 CoverageBuffer::CoverageBuffer(int width, int height, SamplePattern pattern)
     : m_width(std::max(1, width))
     , m_height(std::max(1, height))

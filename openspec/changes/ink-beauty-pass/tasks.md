@@ -193,7 +193,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] 1.6 **Завести функцию наложения правок ветки.** В той же оболочке (zsh или bash), из корня репозитория:
+- [x] 1.6 **Завести функцию наложения правок ветки.** В той же оболочке (zsh или bash), из корня репозитория:
 ```sh
 labpatch() {
   git diff exp/stroke-lab "exp/$1" -- tools/stroke-lab \
@@ -204,25 +204,25 @@ labpatch() {
 ```
   `CMakeLists.txt` и `README.md` стенда исключены: они пишутся целиком в 1.15 и 1.17. После каждого наложения - `git add tools/stroke-lab`: `git apply -3` отказывается работать с файлом, у которого есть неиндексированные правки. Сообщения git могут быть локализованы; важно, «чисто» или «с конфликтами».
 
-- [ ] 1.7 **`exp/rnote`: профиль толщины и `--min-width-factor`.**
+- [x] 1.7 **`exp/rnote`: профиль толщины и `--min-width-factor`.**
 ```sh
 labpatch rnote && git add tools/stroke-lab
 ```
   Ожидание: `main.cpp`, `metrics.cpp` наложены чисто.
 
-- [ ] 1.8 **`exp/outline`: `raster_vs_ideal/truth`, `width_cv`, сэмпл `dots_tap`.**
+- [x] 1.8 **`exp/outline`: `raster_vs_ideal/truth`, `width_cv`, сэмпл `dots_tap`.**
 ```sh
 labpatch outline && git add tools/stroke-lab
 ```
   Ожидание: `corpus.cpp`, `main.cpp` чисто.
 
-- [ ] 1.9 **`exp/google-ink`: сэмпл `dots_taps`.**
+- [x] 1.9 **`exp/google-ink`: сэмпл `dots_taps`.**
 ```sh
 labpatch google-ink && git add tools/stroke-lab
 ```
   Ожидание: `corpus.cpp` чисто.
 
-- [ ] 1.10 **`exp/trajectory`: `--noise`, `--rate`, `--libinput-smoothing`.** (Ветка в задании не названа, но это инфраструктура корпуса, без вариантов: нужна, чтобы проверить на стенде утверждение D6 про перо с меньшим шумом.)
+- [x] 1.10 **`exp/trajectory`: `--noise`, `--rate`, `--libinput-smoothing`.** (Ветка в задании не названа, но это инфраструктура корпуса, без вариантов: нужна, чтобы проверить на стенде утверждение D6 про перо с меньшим шумом.)
 ```sh
 labpatch trajectory
 ```
@@ -245,7 +245,7 @@ labpatch trajectory
 ```
   Затем `git add tools/stroke-lab`.
 
-- [ ] 1.11 **`exp/apps-survey`: `--endcheck`, ошибки толщины по зонам, толщина в `settled_mutations`.**
+- [x] 1.11 **`exp/apps-survey`: `--endcheck`, ошибки толщины по зонам, толщина в `settled_mutations`.**
 ```sh
 labpatch apps-survey
 ```
@@ -287,13 +287,13 @@ labpatch apps-survey
 ```
   Затем `git add tools/stroke-lab`.
 
-- [ ] 1.12 **`exp/latency`: эмуляция кадров и лента мокрых кадров.**
+- [x] 1.12 **`exp/latency`: эмуляция кадров и лента мокрых кадров.**
 ```sh
 labpatch latency && git add tools/stroke-lab
 ```
   Ожидание: `main.cpp`, `metrics.cpp`, `metrics.h`, `render.cpp` чисто.
 
-- [ ] 1.13 **`exp/dry-refine`: ошибка толщины, сдвиг давления, `stroke-lab-aabench`.**
+- [x] 1.13 **`exp/dry-refine`: ошибка толщины, сдвиг давления, `stroke-lab-aabench`.**
 ```sh
 labpatch dry-refine
 ```
@@ -344,7 +344,7 @@ grep -nE '\bwidth(Start|End)\b' tools/stroke-lab/metrics.cpp   # ожидани�
 git add tools/stroke-lab
 ```
 
-- [ ] 1.14 **`exp/antialias`: метрики растеризации и `lattice64`.**
+- [x] 1.14 **`exp/antialias`: метрики растеризации и `lattice64`.**
 ```sh
 labpatch antialias
 ```
@@ -396,7 +396,7 @@ grep -rnE '^(<<<<<<<|=======|>>>>>>>)' tools/stroke-lab   # ожидание: п
 git diff --cached --check                                 # ожидание: пусто
 ```
 
-- [ ] 1.15 **Записать `tools/stroke-lab/CMakeLists.txt` целиком.** Новые единицы перевода в `stroke-lab`, отдельная цель `stroke-lab-aabench`, никакого `install()`:
+- [x] 1.15 **Записать `tools/stroke-lab/CMakeLists.txt` целиком.** Новые единицы перевода в `stroke-lab`, отдельная цель `stroke-lab-aabench`, никакого `install()`:
 ```cmake
 # stroke-lab - офлайн-стенд сравнения конвейеров рукописных чернил.
 #
@@ -461,7 +461,7 @@ set_target_properties(stroke-lab-aabench PROPERTIES AUTOMOC OFF)
 ```
   `git add tools/stroke-lab/CMakeLists.txt`.
 
-- [ ] 1.16 **Гейт: сборка, побайтная сверка, baseline не изменился.** (`SAMPLES` - из 1.4.)
+- [x] 1.16 **Гейт: сборка, побайтная сверка, baseline не изменился.** (`SAMPLES` - из 1.4.)
 ```sh
 sha256sum -c - <<'EOF'
 07751d58b62d2b273bd48992f77629e238bfd00921a446c066b3d08cddb99c32  tools/stroke-lab/main.cpp
@@ -515,7 +515,7 @@ rm -rf /tmp/lab-full && time ./build/tools/stroke-lab/stroke-lab --variants base
 ```
   Ожидание: полный прогон с PNG за несколько секунд (в песочнице 3.4 с), в `/tmp/lab-full` есть `baseline/marker/`, `baseline/aaerr/`, `baseline/wet/` (лента из четырёх кадров); `--endcheck` печатает таблицу с тремя строками baseline и `cap_dev` 1.000 (плоский торец); `aabench` печатает таблицу MSAA/аналитики и пишет `aabench.json`, `aabench.png`. Действие при провале: `FAIL` по ключам 720b497 значит, что разрешение конфликта задело общий код (`runVariant`, `computeMetrics`) - см. сверку контрольных сумм выше.
 
-- [ ] 1.17 **Записать `tools/stroke-lab/README.md` целиком.** Прежний README плюс то, что принесли ветки, без описаний вариантов, которых в дереве нет; раздел «Числа дизайна» с командой сверки; провенанс метрик:
+- [x] 1.17 **Записать `tools/stroke-lab/README.md` целиком.** Прежний README плюс то, что принесли ветки, без описаний вариантов, которых в дереве нет; раздел «Числа дизайна» с командой сверки; провенанс метрик:
 ````markdown
 # stroke-lab
 
@@ -858,7 +858,7 @@ GPU-замер `aa-gpu-bench` (`exp/antialias`, `gpu/`) рисует полос�
 ````
   `git add tools/stroke-lab/README.md`.
 
-- [ ] 1.18 **Проверка готовности для шагов 1-3 (временная, без коммита): варианты из веток собираются со стендом как есть.**
+- [x] 1.18 **Проверка готовности для шагов 1-3 (временная, без коммита): варианты из веток собираются со стендом как есть.**
 ```sh
 V=tools/stroke-lab/variants
 for spec in rnote/e2_pressure.cpp rnote/e3_follow.cpp rnote/rnote_kit.h outline/outline.cpp \
@@ -881,7 +881,7 @@ cmake --build build --target stroke-lab   # пересборка без вари
 ```
   Ожидание (песочница): `e2-pressure-caps` - отслеживание 0.0238, заход 11.42, конец 0.697 (D2: 0.024 / 11.4 / 0.70); `dr-resample-tol` - вершина острия 0.082 / 0.482 (D6: 0.08 / 0.48); `aa-fringe` - 11.32 на масштабе 1; `outline-caps` в `--endcheck` - `cap_dev` 0.000; `settled_mutations` 0 у всех. При провале: вариант зависит от инфраструктуры, которой в этом слиянии нет - найти по ошибке компиляции и дописать в шаг, который этот вариант приносит.
 
-- [ ] 1.19 **Промежуточный коммит.**
+- [x] 1.19 **Промежуточный коммит.**
 ```sh
 git commit -F - <<'EOF'
 Метрики прототипов в стенде
@@ -903,7 +903,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] 1.20 **Записать для шагов 1-3, откуда брать варианты** (справка, кода нет; файлы берутся `git show exp/<ветка>:tools/stroke-lab/variants/<файл> > tools/stroke-lab/variants/<файл>` и коммитятся в своём шаге; совместимость со стендом проверена в 1.18):
+- [x] 1.20 **Записать для шагов 1-3, откуда брать варианты** (справка, кода нет; файлы берутся `git show exp/<ветка>:tools/stroke-lab/variants/<файл> > tools/stroke-lab/variants/<файл>` и коммитятся в своём шаге; совместимость со стендом проверена в 1.18):
 
   | шаг | решение | ветка | файлы | варианты |
   |---|---|---|---|---|

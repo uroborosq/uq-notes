@@ -19,6 +19,7 @@ struct EventRecord
     std::vector<QPointF> provisional;   // провизорный хвост
     double cpuMicros = 0.0;             // addEvent, минимум по повторам
     int wetDirtyVertices = 0;           // vertexCount - settledVertexCount
+    int settledCount = 0;               // окончательных точек после отсчёта
 };
 
 struct StrokeRun
@@ -34,6 +35,10 @@ struct StrokeRun
     // Снимок мокрого кадра (только у штриха, выбранного для снимка).
     int wetSnapshotEvent = -1;
     Geometry wetGeometry;
+    // Ещё несколько мокрых кадров того же штриха (первый - wetSnapshotEvent):
+    // лента кадров в wet/<tag>.png.
+    std::vector<int> wetFilmEvents;
+    std::vector<Geometry> wetFilmGeometry;
 };
 
 struct MetricsOptions

@@ -55,6 +55,10 @@ struct CorpusOptions
     double positionQuantum = 1.0 / 256.0; // wl_fixed
     double noiseSigma = 0.05;             // шум датчика, px
     double pressureNoise = 0.004;
+    // Эмуляция сглаживания libinput (evdev-tablet.c, tablet_smoothen_axes):
+    // положение - среднее последних 4 отсчётов. Для пера WCOM0174 (VID
+    // 0x2D1F) оно, по разбору критика, включено.
+    bool libinputSmoothing = false;
 };
 
 std::vector<Sample> buildCorpus(const CorpusOptions &options = {});

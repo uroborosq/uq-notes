@@ -288,12 +288,22 @@ void sampleEvents(SampleStroke &stroke, const Motion &motion, const CorpusOption
     const double period = 1.0 / options.rateHz;
     const double phase = rng.uniform(0.0, period);
     const auto quant = [](double v, double q) { return std::round(v / q) * q; };
+    std::vector<QPointF> history;
     for (int k = 0;; ++k) {
         const double t = path.t.front() + phase * (k > 0 ? 1.0 : 0.0) + k * period;
         if (t > path.t.back())
             break;
         QPointF pos = truthAt(path, t) + tremor.at(t)
             + QPointF(rng.gauss(), rng.gauss()) * options.noiseSigma;
+        if (options.libinputSmoothing) {
+            history.push_back(pos);
+            if (history.size() > 4)
+                history.erase(history.begin());
+            QPointF sum;
+            for (const QPointF &h : history)
+                sum += h;
+            pos = sum / double(history.size());
+        }
         pos = QPointF(quant(pos.x(), options.positionQuantum), quant(pos.y(), options.positionQuantum));
         double pressure = pressureAt(path, t) + rng.gauss() * options.pressureNoise;
         pressure = std::clamp(quant(pressure, 1.0 / 4096.0), 0.0, 1.0);
@@ -697,6 +707,22 @@ std::vector<Sample> buildCorpus(const CorpusOptions &options)
     specs.push_back({"small_e_10", "«e» 10 px, 180 px/s", {"small"}, 10,
                      text(U"E", 10, false), motion(180, 5, 0.15, 25)});
 
+    {
+        // Точки-тапы: перо касается и почти не движется (0.15…3 px), каждая -
+        // отдельный штрих. Точка над i, пунктуация, точка в «ё».
+        std::vector<Shape> dots;
+        const double lengths[] = {0.15, 0.4, 0.8, 1.5, 3.0};
+        double x = 0.0;
+        for (double length : lengths) {
+            Shape s;
+            s.parts.push_back({QPointF(x, 0.0), QPointF(x + length * 0.8, length * 0.6)});
+            dots.push_back(s);
+            x += 14.0;
+        }
+        specs.push_back({"dots_tap", "Тапы-точки 0.15…3 px, 15 px/s", {"tap"}, 8, dots,
+                         motion(15, 8, 0.12, 26)});
+    }
+
     specs.push_back({"corner_N", "Печатная N 24 px, 300 px/s", {"corner"}, 24,
                      text(U"N", 24, false), motion(300, 12, 0.12, 31)});
     specs.push_back({"corner_M", "Печатная M 20 px, 300 px/s", {"corner", "small"}, 20,
@@ -742,6 +768,22 @@ std::vector<Sample> buildCorpus(const CorpusOptions &options)
     }
     specs.push_back({"slow_hello", "«hello» x-height 18, 70 px/s, тремор 0.3 px", {"slow", "word"},
                      18, text(U"hello", 18, true), motion(70, 9, 0.3, 53)});
+
+    {
+        // Точки и короткие касания (точка над i, «:», «;»): сдвиг пера за
+        // касание 0.3…3 px. Касание совсем без сдвига корпус не умеет (эталону
+        // нужно 2 точки) - его проверяет tools/stroke-lab/variants/google_ink.cpp.
+        std::vector<Shape> taps;
+        const double lengths[] = {0.3, 0.6, 1.0, 1.5, 2.2, 3.0};
+        for (int i = 0; i < 6; ++i) {
+            Shape s;
+            const QPointF a(i * 12.0, (i % 2) * 6.0);
+            s.parts.push_back({a, a + QPointF(lengths[i] * 0.6, lengths[i] * 0.8)});
+            taps.push_back(s);
+        }
+        specs.push_back({"dots_taps", "Точки-касания со сдвигом 0.3…3 px", {"dots"}, 8, taps,
+                         motion(60, 4, 0.12, 61)});
+    }
 
     std::vector<Sample> samples;
     for (const Spec &spec : specs)

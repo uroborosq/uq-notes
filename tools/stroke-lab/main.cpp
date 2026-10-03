@@ -18,8 +18,10 @@
 #include <map>
 
 #include "corpus.h"
+#include "endcheck.h"
 #include "lab.h"
 #include "metrics.h"
+#include "rastermetrics.h"
 #include "render.h"
 
 namespace lab {
@@ -85,6 +87,11 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
             int mutations = 0;
             const int snapshotEvent =
                 si == snapshotStroke ? int(std::floor(n * 0.6)) : -1;
+            // Лента кадров: ещё три момента того же штриха.
+            std::vector<int> filmEvents;
+            if (si == snapshotStroke)
+                for (double f : {0.6, 0.3, 0.45, 0.75})
+                    filmEvents.push_back(int(std::floor(n * f)));
             if (last)
                 run.events.assign(n, EventRecord());
 
@@ -111,7 +118,10 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
                     const size_t idx = size_t(from) + j;
                     if (idx < seen.size()) {
                         const QPointF d = seen[idx].pos - ws.settledFrom[j].pos;
-                        if (std::hypot(d.x(), d.y()) > 1e-9)
+                        // Толщина окончательной точки тоже не имеет права
+                        // меняться (apps-survey: давление по окну).
+                        if (std::hypot(d.x(), d.y()) > 1e-9
+                            || std::abs(seen[idx].width - ws.settledFrom[j].width) > 1e-9)
                             ++mutations;
                     } else {
                         seen.push_back(ws.settledFrom[j]);
@@ -129,9 +139,16 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
                 for (const CenterPoint &c : ws.provisional)
                     record.provisional.push_back(c.pos * scale);
                 record.wetDirtyVertices = ws.vertexCount - ws.settledVertexCount;
+                record.settledCount = ws.settledCount;
                 if (int(k) == snapshotEvent) {
                     run.wetSnapshotEvent = snapshotEvent;
                     run.wetGeometry = variant->wetGeometry();
+                }
+                for (int fe : filmEvents) {
+                    if (int(k) == fe) {
+                        run.wetFilmEvents.push_back(fe);
+                        run.wetFilmGeometry.push_back(variant->wetGeometry());
+                    }
                 }
             }
             const auto f0 = std::chrono::steady_clock::now();
@@ -145,7 +162,8 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
                 run.finalVertices = run.geometry.vertexCount();
                 for (size_t j = 0; j < seen.size() && j < run.centerline.size(); ++j) {
                     const QPointF d = seen[j].pos - run.centerline[j].pos;
-                    if (std::hypot(d.x(), d.y()) > 1e-9)
+                    if (std::hypot(d.x(), d.y()) > 1e-9
+                        || std::abs(seen[j].width - run.centerline[j].width) > 1e-9)
                         ++mutations;
                 }
                 if (seen.size() > run.centerline.size())
@@ -203,16 +221,96 @@ const Column kColumns[] = {
     {"shape_hausdorff_pct", Column::Mean, "small H%"},
     {"closed_area_ratio", Column::Mean, "o area"},
     {"width_hf_rms_px", Column::Mean, "w hf"},
+    {"width_mean_ratio", Column::Mean, "w ratio"},
+    {"width_track_rms_rel", Column::Mean, "w track"},
+    {"width_end_ratio", Column::Mean, "w end"},
+    {"width_rise_px", Column::Mean, "w rise px"},
+    {"width_start_err_px", Column::Mean, "w start err"},
+    {"width_end_err_px", Column::Mean, "w end err"},
+    {"width_body_err_px", Column::Mean, "w body err"},
+    {"width_step_max_px", Column::Max, "w step max"},
+    {"width_body_cv", Column::Mean, "w body cv"},
     {"wet_lag_px_mean", Column::Mean, "lag px"},
     {"wet_lag_px_p95", Column::Mean, "lag p95"},
     {"wet_lag_truth_px_mean", Column::Mean, "lag gt px"},
     {"wet_lag_ms_mean", Column::Mean, "lag ms"},
     {"wet_vs_final_mean_px", Column::Mean, "wet≠final"},
+    {"frame_gap_px_med_L22", Column::Mean, "gap22 med"},
+    {"frame_gap_fast_px_med_L22", Column::Mean, "gap22 fast"},
+    {"frame_gap_ms_med_L22", Column::Mean, "gap22 ms"},
+    {"frame_ahead_px_p99_L22", Column::Mean, "ahead p99"},
+    {"frame_ahead_px_max_L22", Column::Max, "ahead max"},
+    {"frame_offpath_px_p99", Column::Mean, "offpath p99"},
+    {"frame_offpath_px_max", Column::Max, "offpath max"},
+    {"frame_retract_px_p99", Column::Mean, "retract p99"},
+    {"frame_heading_err_deg_p95", Column::Mean, "head° p95"},
+    {"frame_wag_deg_p95", Column::Mean, "wag° p95"},
+    {"frame_tail_vs_final_px_p95", Column::Mean, "tail≠fin p95"},
+    {"frame_lift_ahead_px_max", Column::Max, "lift max"},
     {"settled_mutations", Column::Sum, "mut"},
     {"cpu_us_per_event_mean", Column::Mean, "µs/ev"},
     {"cpu_us_per_event_p99", Column::Max, "µs p99"},
     {"final_vertices", Column::Sum, "verts"},
+    {"raster_vs_ideal_rms", Column::Mean, "rast rms"},
+    {"raster_vs_ideal_p99", Column::Mean, "rast p99"},
+    {"raster_vs_ideal_ink_ratio", Column::Mean, "ink/ideal"},
+    {"raster_vs_truth_rms", Column::Mean, "rast-truth rms"},
+    {"raster_vs_truth_ink_ratio", Column::Mean, "ink/truth"},
+    {"width_cv", Column::Mean, "w cv"},
+    {"width_p5_physpx", Column::Mean, "w p5 px"},
+    // Растеризация (rastermetrics.h): ошибка покрытия ×255.
+    {"aa_rmse_shape", Column::Mean, "AA rmse"},
+    {"aa_p99_shape", Column::Mean, "AA p99"},
+    {"aa_rmse_ideal", Column::Mean, "AA vs ideal"},
+    {"aa_rmse_truth", Column::Mean, "px vs truth"},
+    {"aa_flicker", Column::Mean, "flicker"},
+    {"aa_mass_breath_pct", Column::Mean, "mass breath%"},
+    {"aa_mass_ratio", Column::Mean, "mass/ideal"},
+    {"aa_mass_cv", Column::Mean, "mass CV"},
+    {"marker_dark_frac", Column::Mean, "marker dark"},
 };
+
+// Покрытие пикселя по красному каналу: бумага 255, чернила 0x1c - самый
+// большой размах каналов.
+double inkCoverage(QRgb pixel, const QColor &paper, const QColor &ink)
+{
+    return std::clamp(double(paper.red() - qRed(pixel)) / double(paper.red() - ink.red()), 0.0, 1.0);
+}
+
+// Растровые метрики: картинка «как в приложении» против эталонной картинки
+// (ideal raster той же осевой - вклад тесселяции и растеризации; truth - всё
+// вместе). rms/p99 - по пикселям, где хоть одна картинка покрыта больше 1/64;
+// ink_ratio - масса чернил Σcov / Σcov эталона (плоские торцы < 1, двойное
+// смешивание > 1).
+void rasterMetrics(const QImage &app, const QImage &reference, const QColor &paper,
+                   const QColor &ink, const QString &prefix, QJsonObject &m)
+{
+    if (app.isNull() || reference.isNull() || app.size() != reference.size())
+        return;
+    std::vector<double> errors;
+    double sumApp = 0.0, sumRef = 0.0, sq = 0.0;
+    for (int y = 0; y < app.height(); ++y) {
+        const QRgb *a = reinterpret_cast<const QRgb *>(app.constScanLine(y));
+        const QRgb *r = reinterpret_cast<const QRgb *>(reference.constScanLine(y));
+        for (int x = 0; x < app.width(); ++x) {
+            const double ca = inkCoverage(a[x], paper, ink);
+            const double cr = inkCoverage(r[x], paper, ink);
+            sumApp += ca;
+            sumRef += cr;
+            if (ca < 1.0 / 64 && cr < 1.0 / 64)
+                continue;
+            const double e = ca - cr;
+            sq += e * e;
+            errors.push_back(std::abs(e));
+        }
+    }
+    if (errors.empty())
+        return;
+    std::sort(errors.begin(), errors.end());
+    m[prefix + QStringLiteral("_rms")] = std::sqrt(sq / errors.size());
+    m[prefix + QStringLiteral("_p99")] = errors[size_t(0.99 * (errors.size() - 1))];
+    m[prefix + QStringLiteral("_ink_ratio")] = sumRef > 0 ? sumApp / sumRef : 0.0;
+}
 
 } // namespace
 
@@ -246,13 +344,35 @@ int main(int argc, char **argv)
     QCommandLineOption repsOpt(QStringLiteral("reps"),
                                QStringLiteral("Повторов для замера CPU (берётся минимум)"),
                                QStringLiteral("n"), QStringLiteral("3"));
+    QCommandLineOption minWidthOpt(QStringLiteral("min-width-factor"),
+                                   QStringLiteral("Нижний предел эталонного закона толщины w·(f + (1−f)·p)"),
+                                   QStringLiteral("f"), QStringLiteral("0.25"));
+    QCommandLineOption noiseOpt(QStringLiteral("noise"),
+                                QStringLiteral("Шум датчика σ, px (по умолчанию 0.05)"),
+                                QStringLiteral("px"), QStringLiteral("0.05"));
+    QCommandLineOption rateOpt(QStringLiteral("rate"), QStringLiteral("Частота пера, Гц (481)"),
+                               QStringLiteral("hz"), QStringLiteral("481"));
+    QCommandLineOption libinputOpt(QStringLiteral("libinput-smoothing"),
+                                   QStringLiteral("Эмулировать среднее 4 отсчётов libinput"));
     QCommandLineOption noPngOpt(QStringLiteral("no-png"), QStringLiteral("Только метрики"));
     QCommandLineOption listOpt(QStringLiteral("list"), QStringLiteral("Список вариантов и сэмплов"));
+    QCommandLineOption endOpt(QStringLiteral("endcheck"),
+                              QStringLiteral("Синтетика концов штриха (касание, отрыв, тап) и выход"));
+    QCommandLineOption noRasterOpt(QStringLiteral("no-raster"),
+                                   QStringLiteral("Без метрик растеризации (rastermetrics.h)"));
+    QCommandLineOption shiftsOpt(QStringLiteral("shifts"),
+                                 QStringLiteral("Субпиксельных сдвигов для aa_flicker"),
+                                 QStringLiteral("n"), QStringLiteral("8"));
     parser.addOptions({variantsOpt, outOpt, samplesOpt, scalesOpt, widthOpt, dprOpt, repsOpt,
-                       noPngOpt, listOpt});
+                       minWidthOpt, noiseOpt, rateOpt, libinputOpt, noPngOpt, listOpt, endOpt,
+                       noRasterOpt, shiftsOpt});
     parser.process(app);
 
-    const std::vector<Sample> corpus = buildCorpus();
+    CorpusOptions corpusOptions;
+    corpusOptions.noiseSigma = parser.value(noiseOpt).toDouble();
+    corpusOptions.rateHz = parser.value(rateOpt).toDouble();
+    corpusOptions.libinputSmoothing = parser.isSet(libinputOpt);
+    const std::vector<Sample> corpus = buildCorpus(corpusOptions);
     auto &variants = registry();
     std::sort(variants.begin(), variants.end(),
               [](const VariantInfo &a, const VariantInfo &b) {
@@ -289,6 +409,9 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (parser.isSet(endOpt))
+        return runEndCheck(chosen, parser.value(widthOpt).toDouble());
+
     const QStringList samplePatterns = parser.value(samplesOpt).split(',', Qt::SkipEmptyParts);
     std::vector<const Sample *> samples;
     for (const Sample &s : corpus)
@@ -306,6 +429,10 @@ int main(int argc, char **argv)
     RenderOptions render;
     render.dpr = parser.value(dprOpt).toDouble();
     render.metrics.width = width;
+    render.metrics.minWidthFactor = parser.value(minWidthOpt).toDouble();
+    const bool raster = !parser.isSet(noRasterOpt);
+    RasterMetricsOptions rasterOptions;
+    rasterOptions.shifts = std::max(1, parser.value(shiftsOpt).toInt());
 
     // results[variant][scale][sample] = metrics
     std::map<std::string, std::map<double, std::map<std::string, QJsonObject>>> results;
@@ -331,15 +458,59 @@ int main(int argc, char **argv)
             for (const VariantInfo *v : chosen) {
                 std::vector<StrokeRun> runs = runVariant(*v, *sample, scale, width, render.ink, reps);
                 QJsonObject m = computeMetrics(*sample, runs, scale, render.metrics);
+                {
+                    // Ровность толщины: коэффициент вариации полной толщины по
+                    // точкам осевой (взвешено длиной) и 5-й перцентиль толщины в
+                    // физических px - насколько тонкой линия становится.
+                    double sw = 0, swx = 0, swxx = 0;
+                    std::vector<double> widths;
+                    for (const StrokeRun &run : runs) {
+                        for (size_t i = 1; i < run.centerline.size(); ++i) {
+                            const QPointF d = run.centerline[i].pos - run.centerline[i - 1].pos;
+                            const double l = std::hypot(d.x(), d.y());
+                            const double w = run.centerline[i].width * scale * render.dpr;
+                            sw += l;
+                            swx += l * w;
+                            swxx += l * w * w;
+                            widths.push_back(w);
+                        }
+                    }
+                    if (sw > 0 && !widths.empty()) {
+                        const double mean = swx / sw;
+                        m["width_cv"] = std::sqrt(std::max(0.0, swxx / sw - mean * mean)) / mean;
+                        std::sort(widths.begin(), widths.end());
+                        m["width_p5_physpx"] = widths[size_t(0.05 * (widths.size() - 1))];
+                        m["width_mean_physpx"] = mean;
+                    }
+                }
                 m["sample"] = QString::fromStdString(sample->id);
                 m["title"] = QString::fromStdString(sample->title);
                 m["scale"] = scale;
+                QImage marker, errorMap;
+                if (raster) {
+                    RasterMetricsResult r =
+                        computeRasterMetrics(*sample, runs, scale, render, rasterOptions);
+                    for (auto it = r.metrics.begin(); it != r.metrics.end(); ++it)
+                        m[it.key()] = it.value();
+                    marker = r.marker;
+                    errorMap = r.errorMap;
+                }
                 results[v->name][scale][sample->id] = m;
                 if (!png)
                     continue;
                 const QString dir = out + '/' + QString::fromStdString(v->name);
+                if (!marker.isNull())
+                    save(marker, dir + QStringLiteral("/marker/") + tag + QStringLiteral(".png"));
+                if (!errorMap.isNull())
+                    save(upscale(errorMap, 4),
+                         dir + QStringLiteral("/aaerr/") + tag + QStringLiteral(".png"));
                 const QImage appImage = renderApp(*sample, runs, scale, render);
                 const QImage ideal = renderIdeal(*sample, runs, scale, render);
+                rasterMetrics(appImage, ideal, render.paper, render.ink,
+                              QStringLiteral("raster_vs_ideal"), m);
+                rasterMetrics(appImage, truth, render.paper, render.ink,
+                              QStringLiteral("raster_vs_truth"), m);
+                results[v->name][scale][sample->id] = m;
                 save(appImage, dir + QStringLiteral("/png/") + tag + QStringLiteral(".png"));
                 save(ideal, dir + QStringLiteral("/png/") + tag + QStringLiteral("_ideal.png"));
                 save(renderWetFrame(*sample, runs, scale, render),

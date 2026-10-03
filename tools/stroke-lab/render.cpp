@@ -197,6 +197,94 @@ QPointF focusPoint(const Sample &sample)
     return best;
 }
 
+namespace {
+
+// Один мокрый кадр x4 вокруг кончика после отсчёта k.
+QImage renderWetTile(const SampleStroke &stroke, const EventRecord &event, int k,
+                     const Geometry &wet, double scale, const RenderOptions &options)
+{
+    constexpr int kZoom = 4;
+    constexpr double kW = 80.0, kH = 60.0;
+    // Где перо будет в момент фотона: L = 22 мс от отсчёта (эмуляция кадров в
+    // metrics.cpp, kFrameLatencies).
+    constexpr double kPhotonDelay = 0.022;
+    const QPointF origin = event.tip - QPointF(kW / 2, kH / 2);
+    const double toPixel = scale * options.dpr;
+
+    QImage frame(int(std::ceil(kW * options.dpr)), int(std::ceil(kH * options.dpr)),
+                 QImage::Format_RGB32);
+    frame.fill(options.paper);
+    CoverageBuffer buffer(frame.width(), frame.height(), SamplePattern::msaa4());
+    Geometry g = wet;
+    for (QPointF &p : g.vertices)
+        p = p - origin / scale;
+    for (QPolygonF &ring : g.polygons)
+        ring.translate(-origin / scale);
+    addGeometry(buffer, g, toPixel);
+    buffer.compositeOnto(frame, options.ink);
+    QImage big = upscale(frame, kZoom);
+
+    QPainter painter(&big);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const auto map = [&](const QPointF &screen) {
+        return (screen - origin) * options.dpr * kZoom;
+    };
+    const double tk = stroke.eventTrueTime[size_t(k)];
+    // Эталон - тонкой зелёной линией до отсчёта, пурпурной - до фотона.
+    QPainterPath truth, ahead;
+    bool first = true, firstAhead = true;
+    QPointF photon = stroke.truth.p.back();
+    for (size_t i = 0; i < stroke.truth.p.size(); i += 5) {
+        const double t = stroke.truth.t[i];
+        if (t <= tk) {
+            if (first)
+                truth.moveTo(map(stroke.truth.p[i]));
+            else
+                truth.lineTo(map(stroke.truth.p[i]));
+            first = false;
+        } else if (t <= tk + kPhotonDelay) {
+            if (firstAhead)
+                ahead.moveTo(map(stroke.truth.p[i]));
+            else
+                ahead.lineTo(map(stroke.truth.p[i]));
+            firstAhead = false;
+            photon = stroke.truth.p[i];
+        }
+    }
+    painter.setPen(QPen(QColor(0, 200, 90), 1.2));
+    painter.drawPath(truth);
+    painter.setPen(QPen(QColor(200, 0, 200), 1.2, Qt::DashLine));
+    painter.drawPath(ahead);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(255, 150, 0));
+    for (int i = 0; i <= k; ++i)
+        painter.drawEllipse(map(stroke.events[size_t(i)].position), 1.4, 1.4);
+    painter.setBrush(QColor(220, 30, 30, 200));
+    for (const QPointF &p : event.provisional)
+        painter.drawEllipse(map(p), 1.6, 1.6);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(220, 30, 30), 1.5));
+    painter.drawEllipse(map(event.tip), 6.0, 6.0);
+    const QPointF pen = map(stroke.events[size_t(k)].position);
+    painter.setPen(QPen(QColor(30, 90, 230), 1.5));
+    painter.drawLine(pen - QPointF(8, 0), pen + QPointF(8, 0));
+    painter.drawLine(pen - QPointF(0, 8), pen + QPointF(0, 8));
+    const QPointF ph = map(photon);
+    painter.setPen(QPen(QColor(200, 0, 200), 1.5));
+    painter.drawLine(ph - QPointF(6, 6), ph + QPointF(6, 6));
+    painter.drawLine(ph - QPointF(6, -6), ph + QPointF(6, -6));
+    painter.setPen(QColor(0, 0, 0));
+    painter.drawText(QPointF(6, 14),
+                     QStringLiteral("event %1, lag %2 px, pen@+22ms %3 px")
+                         .arg(k)
+                         .arg(len(event.tip - stroke.events[size_t(k)].position), 0, 'f', 2)
+                         .arg(len(event.tip - photon), 0, 'f', 1));
+    painter.end();
+    return big;
+}
+
+} // namespace
+
 QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs, double scale,
                       const RenderOptions &options)
 {
@@ -212,65 +300,35 @@ QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs, 
     if (!run || strokeIndex >= sample.strokes.size())
         return {};
     const SampleStroke &stroke = sample.strokes[strokeIndex];
-    const int k = run->wetSnapshotEvent;
-    const EventRecord &event = run->events[size_t(k)];
-
-    constexpr int kZoom = 4;
-    constexpr double kW = 80.0, kH = 60.0;
-    const QPointF origin = event.tip - QPointF(kW / 2, kH / 2);
-    const double toPixel = scale * options.dpr;
-
-    QImage frame(int(std::ceil(kW * options.dpr)), int(std::ceil(kH * options.dpr)),
-                 QImage::Format_RGB32);
-    frame.fill(options.paper);
-    CoverageBuffer buffer(frame.width(), frame.height(), SamplePattern::msaa4());
-    Geometry g = run->wetGeometry;
-    for (QPointF &p : g.vertices)
-        p = p - origin / scale;
-    for (QPolygonF &ring : g.polygons)
-        ring.translate(-origin / scale);
-    addGeometry(buffer, g, toPixel);
-    buffer.compositeOnto(frame, options.ink);
-    QImage big = upscale(frame, kZoom);
-
-    QPainter painter(&big);
-    painter.setRenderHint(QPainter::Antialiasing);
-    const auto map = [&](const QPointF &screen) {
-        return (screen - origin) * options.dpr * kZoom;
-    };
-    // Эталон - тонкой зелёной линией.
-    QPainterPath truth;
-    bool first = true;
-    for (size_t i = 0; i < stroke.truth.p.size(); i += 5) {
-        if (stroke.truth.t[i] > stroke.eventTrueTime[size_t(k)])
-            break;
-        if (first)
-            truth.moveTo(map(stroke.truth.p[i]));
-        else
-            truth.lineTo(map(stroke.truth.p[i]));
-        first = false;
+    // Лента: все записанные кадры по порядку отсчётов (или один снимок).
+    std::vector<QImage> tiles;
+    if (!run->wetFilmEvents.empty()) {
+        for (size_t i = 0; i < run->wetFilmEvents.size(); ++i) {
+            const int k = run->wetFilmEvents[i];
+            tiles.push_back(renderWetTile(stroke, run->events[size_t(k)], k,
+                                          run->wetFilmGeometry[i], scale, options));
+        }
+    } else {
+        const int k = run->wetSnapshotEvent;
+        tiles.push_back(renderWetTile(stroke, run->events[size_t(k)], k, run->wetGeometry, scale,
+                                      options));
     }
-    painter.setPen(QPen(QColor(0, 200, 90), 1.2));
-    painter.drawPath(truth);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(255, 150, 0));
-    for (int i = 0; i <= k; ++i)
-        painter.drawEllipse(map(stroke.events[size_t(i)].position), 1.4, 1.4);
-    painter.setBrush(QColor(220, 30, 30, 200));
-    for (const QPointF &p : event.provisional)
-        painter.drawEllipse(map(p), 1.6, 1.6);
-    painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(220, 30, 30), 1.5));
-    painter.drawEllipse(map(event.tip), 6.0, 6.0);
-    const QPointF pen = map(stroke.events[size_t(k)].position);
-    painter.setPen(QPen(QColor(30, 90, 230), 1.5));
-    painter.drawLine(pen - QPointF(8, 0), pen + QPointF(8, 0));
-    painter.drawLine(pen - QPointF(0, 8), pen + QPointF(0, 8));
-    painter.setPen(QColor(0, 0, 0));
-    painter.drawText(QPointF(6, 14),
-                     QStringLiteral("event %1, lag %2 px").arg(k).arg(len(event.tip - stroke.events[size_t(k)].position), 0, 'f', 2));
+    constexpr int kGap = 4;
+    int width = 0, height = 0;
+    for (const QImage &t : tiles) {
+        width += t.width() + kGap;
+        height = std::max(height, t.height());
+    }
+    QImage film(std::max(1, width - kGap), height, QImage::Format_RGB32);
+    film.fill(QColor(225, 225, 228));
+    QPainter painter(&film);
+    int x = 0;
+    for (const QImage &t : tiles) {
+        painter.drawImage(x, 0, t);
+        x += t.width() + kGap;
+    }
     painter.end();
-    return big;
+    return film;
 }
 
 QImage composeSheet(const std::vector<QString> &columnTitles,
