@@ -331,6 +331,15 @@ int DocumentCanvas::inkGeometryStrokeCount(int page) const
     return int(m_inkGeometry.value(page).size());
 }
 
+QVector<StrokeTessellator::Vertex> DocumentCanvas::inkGeometryStrip(int page, quint64 id) const
+{
+    for (const StrokeGeometry &entry : m_inkGeometry.value(page)) {
+        if (entry.id == id)
+            return entry.strip;
+    }
+    return {};
+}
+
 namespace {
 
 // Докуда куски мокрого штриха покрывают полосу, в вершинах; -1 - узла нет.
@@ -1420,6 +1429,9 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
     prototype.color = m_penColor;
     prototype.width = m_penWidth;
     prototype.insert = insert;
+    // Новые штрихи пера - с заострёнными концами; закон уходит вместе со
+    // штрихом в страницу, файл и историю (ink-beauty-pass, design.md, D3).
+    prototype.style = StrokeStyle::Tapered;
 
     m_wetPage = page;
     m_wetInsert = insert;
@@ -1608,6 +1620,9 @@ DocumentCanvas::tessellate(const QList<InkDocument::Record> &records) const
     StrokeTessellator tessellator;
     for (const InkDocument::Record &record : records) {
         tessellator.setWidth(record.stroke.width);
+        // Каждый штрих - своим законом толщины: нанесённые до заострения
+        // остаются прежней толщины (D3).
+        tessellator.setStyle(record.stroke.style);
         StrokeGeometry entry;
         entry.id = record.id;
         entry.color = record.stroke.color;

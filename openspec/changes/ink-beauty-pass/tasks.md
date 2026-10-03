@@ -3129,7 +3129,7 @@ Tapered 0.710.
 
 ### 4c. Холст и экспорт
 
-- [ ] 4.18 **Тестовый доступ к сухой геометрии штриха.** Без него не видно,
+- [x] 4.18 **Тестовый доступ к сухой геометрии штриха.** Без него не видно,
   каким законом `DocumentCanvas::tessellate` нарисовал штрих.
   `src/canvas/documentcanvas.h`, после
   `    Q_INVOKABLE int inkGeometryStrokeCount(int page) const;` вставить:
@@ -3157,7 +3157,7 @@ Tapered 0.710.
 
   (`StrokeTessellator` в заголовке уже виден через `ink/wetstroke.h`.)
 
-- [ ] 4.19 **Тесты холста в `tests/tst_canvasink.cpp`.**
+- [x] 4.19 **Тесты холста в `tests/tst_canvasink.cpp`.**
 
   1. Перед `    void inkInGapBetweenPagesIsIgnored()` вставить:
 
@@ -3242,14 +3242,14 @@ Tapered 0.710.
        `        tessellator.setStyle(drawn.style);` - контур экспорта строится тем
        же законом, что и в `NoteExporter`.
 
-- [ ] 4.20 **Прогон: штрих пера ещё Legacy.**
+- [x] 4.20 **Прогон: штрих пера ещё Legacy.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_canvasink$' --output-on-failure`
   Ожидается `3 failed`: `penStrokesAreTapered` и
   `finishedStrokeIsTheSameEverywhere` - «Compared values are not the same»
   (Legacy вместо Tapered); `dryGeometryFollowsStrokeStyle` - «штрих 2:
   толщина 1, ожидалась 0.32».
 
-- [ ] 4.21 **Холст: заострение новых штрихов и закон в сухой тесселяции.**
+- [x] 4.21 **Холст: заострение новых штрихов и закон в сухой тесселяции.**
   `src/canvas/documentcanvas.cpp`, `DocumentCanvas::beginInkAt`: после
   `    prototype.insert = insert;` вставить:
 
@@ -3271,11 +3271,11 @@ Tapered 0.710.
   Геометрия вкладышей (`m_insertGeometry`) строится той же `tessellate()` -
   отдельной правки не нужно.
 
-- [ ] 4.22 **Прогон.**
+- [x] 4.22 **Прогон.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_(canvasink|pagescenegraph|insertoverlay)$' --output-on-failure`
   Ожидается `100% tests passed, 0 tests failed out of 3`.
 
-- [ ] 4.23 **Тест экспорта в `tests/tst_export.cpp`.** Замена дешевле не нужна:
+- [x] 4.23 **Тест экспорта в `tests/tst_export.cpp`.** Замена дешевле не нужна:
   тест в духе `insertInkIsNotExported` (растр `pdftoppm`) стоит один экспорт
   одной страницы. Вставить перед `private:` в конце класса (после
   `insertInkIsNotExported`):
@@ -3348,12 +3348,12 @@ Tapered 0.710.
 
   Ожидаемые массы (замер `QPdfWriter` + `pdftoppm`): Legacy 3.0, Tapered 0.71.
 
-- [ ] 4.24 **Прогон: экспорт рисует прежним законом.**
+- [x] 4.24 **Прогон: экспорт рисует прежним законом.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_export$' --output-on-failure`
   Ожидается `1 failed`: `exportFollowsStrokeStyle` - «Tapered: масса 3.0… при
   Legacy 3.0…».
 
-- [ ] 4.25 **Экспорт задаёт закон.** `src/export/noteexporter.cpp`, в цикле по
+- [x] 4.25 **Экспорт задаёт закон.** `src/export/noteexporter.cpp`, в цикле по
   штрихам страницы после `                    tessellator.setWidth(record->stroke.width);`
   вставить:
 
@@ -3362,12 +3362,12 @@ Tapered 0.710.
                       tessellator.setStyle(record->stroke.style);
   ```
 
-- [ ] 4.26 **Прогон: весь набор.**
+- [x] 4.26 **Прогон: весь набор.**
   `cmake --build build -j$(nproc) && ctest --test-dir build --output-on-failure`
   Ожидается `100% tests passed`. `tst_idleframes` без сессии Wayland сообщает
   SKIP - это не провал.
 
-- [ ] 4.27 **Коммит.**
+- [x] 4.27 **Коммит.**
 
   ```sh
   git add src/canvas/documentcanvas.h src/canvas/documentcanvas.cpp \

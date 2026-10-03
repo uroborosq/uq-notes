@@ -203,6 +203,8 @@ bool NoteExporter::exportNow(const QString &sourcePdf, const QList<QSizeF> &disp
 
                 for (const InkDocument::Record *record : it.value()) {
                     tessellator.setWidth(record->stroke.width);
+                    // Тот же закон толщины, что на экране (ink-beauty-pass, D3).
+                    tessellator.setStyle(record->stroke.style);
                     const QPolygonF outline = tessellator.outline(record->stroke.points);
                     if (outline.isEmpty())
                         continue;

@@ -466,6 +466,69 @@ private slots:
         QVERIFY2(!anyPixel(QRect(210, 335, 180, 30), blue), "чернила вкладыша попали в экспорт");
     }
 
+    // ink-beauty-pass, D3: экспорт рисует каждый штрих его законом толщины.
+    // Две прямые с нулевым нажимом, перо 12 pt: Legacy - 3 pt, Tapered - 0.96 pt.
+    void exportFollowsStrokeStyle()
+    {
+        PdfDocumentModel document;
+        QVERIFY(document.open(fixtures::noOutline()));
+        const Prepared prepared = prepare(document);
+
+        InkDocument ink;
+        for (int i = 0; i < 2; ++i) {
+            Stroke stroke;
+            stroke.page = 0;
+            stroke.width = 12.0;
+            stroke.color = QColor(220, 20, 30);
+            stroke.style = i == 0 ? StrokeStyle::Legacy : StrokeStyle::Tapered;
+            for (int k = 0; k <= 20; ++k)
+                stroke.points.append({QPointF(60 + k * 23.0, 200 + i * 200), 0.0, k / 200.0});
+            QVERIFY(ink.addStroke(stroke) != 0);
+        }
+
+        const QString output = m_dir.filePath(QStringLiteral("styles.pdf"));
+        QString error;
+        QVERIFY2(NoteExporter::exportNow(fixtures::noOutline(), prepared.sizes,
+                                         prepared.rotations, ink.allStrokes(), output, &error),
+                 qPrintable(error));
+
+        // 72 точки на дюйм: пиксель - точка страницы.
+        const QString png = m_dir.filePath(QStringLiteral("styles"));
+        QProcess render;
+        render.start(QStringLiteral("pdftoppm"),
+                     {QStringLiteral("-f"), QStringLiteral("1"), QStringLiteral("-l"),
+                      QStringLiteral("1"), QStringLiteral("-r"), QStringLiteral("72"),
+                      QStringLiteral("-png"), output, png});
+        QVERIFY(render.waitForFinished(60000));
+        const QFileInfo root(png);
+        const QStringList produced =
+            QDir(root.absolutePath())
+                .entryList({root.fileName() + QStringLiteral("-*.png")}, QDir::Files);
+        QVERIFY(!produced.isEmpty());
+        const QImage image(QDir(root.absolutePath()).filePath(produced.first()));
+        QVERIFY(!image.isNull());
+
+        // Масса чернил поперёк линии в столбце x = 300: доля покрытия по
+        // разности красного и зелёного (у чернил 200, у бумаги и чёрного
+        // текста 0), так что текст страницы в счёт не идёт.
+        const auto inkAcross = [&image](int centerY) {
+            qreal mass = 0.0;
+            for (int y = centerY - 10; y <= centerY + 10; ++y) {
+                if (!image.valid(300, y))
+                    continue;
+                const QColor c = image.pixelColor(300, y);
+                mass += qBound(0.0, (c.red() - c.green()) / 200.0, 1.0);
+            }
+            return mass;
+        };
+        const qreal legacy = inkAcross(200);
+        const qreal tapered = inkAcross(400);
+        QVERIFY2(legacy > 2.0 && legacy < 4.0,
+                 qPrintable(QStringLiteral("Legacy: масса %1 вместо около 3").arg(legacy)));
+        QVERIFY2(tapered < legacy * 0.5,
+                 qPrintable(QStringLiteral("Tapered: масса %1 при Legacy %2").arg(tapered).arg(legacy)));
+    }
+
 private:
     QTemporaryDir m_dir;
 };

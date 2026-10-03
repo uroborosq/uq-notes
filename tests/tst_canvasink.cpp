@@ -239,6 +239,70 @@ private slots:
         QCOMPARE(m_ink.strokeCount(), 0);
     }
 
+    // ink-beauty-pass, D3, сценарий «Заострение новых штрихов»: штрих пера
+    // получает заострённый закон толщины.
+    void penStrokesAreTapered()
+    {
+        m_canvas.goToPage(0);
+        drawLine(&m_canvas, QPointF(400, 300), QPointF(600, 300));
+        QCOMPARE(m_ink.strokeCount(), 1);
+        QCOMPARE(m_ink.allStrokes().first().stroke.style, StrokeStyle::Tapered);
+    }
+
+    // Сухая геометрия рисует каждый штрих его собственным законом: штрихи,
+    // нанесённые раньше (Legacy), толщину не меняют, а перо без давления
+    // рисует прежнюю толщину и в заострённом штрихе.
+    void dryGeometryFollowsStrokeStyle()
+    {
+        m_canvas.goToPage(0);
+        const int page = m_canvas.pageAtView(QPointF(450, 350));
+        QVERIFY(page >= 0);
+
+        struct Spec
+        {
+            StrokeStyle style;
+            qreal pressure;
+            qreal expectedFactor;
+        };
+        const QList<Spec> specs = {
+            {StrokeStyle::Legacy, 0.0, 0.25},
+            {StrokeStyle::Tapered, 0.0, 0.08},
+            {StrokeStyle::Tapered, -1.0, 0.7375},
+        };
+        QList<InkDocument::Record> records;
+        for (int i = 0; i < specs.size(); ++i) {
+            Stroke stroke;
+            stroke.page = page;
+            stroke.width = 4.0;
+            stroke.style = specs[i].style;
+            for (int k = 0; k <= 20; ++k)
+                stroke.points.append({QPointF(40 + k * 8.0, 120 + i * 40), specs[i].pressure, k / 200.0});
+            records.append({quint64(i + 1), stroke});
+        }
+        m_ink.loadStrokes(records, specs.size() + 1);
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), int(specs.size()));
+
+        // Прямая вдоль x с постоянным нажимом: вертикальный размах полосы - полная
+        // толщина, как бы ни были устроены торцы и стыки (шаги 2 и 3 их меняют).
+        for (int i = 0; i < specs.size(); ++i) {
+            const QVector<StrokeTessellator::Vertex> strip =
+                m_canvas.inkGeometryStrip(page, quint64(i + 1));
+            QVERIFY2(strip.size() >= 4, qPrintable(QString::number(i)));
+            qreal top = 1e9;
+            qreal bottom = -1e9;
+            for (const StrokeTessellator::Vertex &vertex : strip) {
+                top = qMin(top, qreal(vertex.y));
+                bottom = qMax(bottom, qreal(vertex.y));
+            }
+            const qreal width = bottom - top;
+            QVERIFY2(qAbs(width - 4.0 * specs[i].expectedFactor) < 1e-3,
+                     qPrintable(QStringLiteral("штрих %1: толщина %2, ожидалась %3")
+                                    .arg(i + 1)
+                                    .arg(width)
+                                    .arg(4.0 * specs[i].expectedFactor)));
+        }
+    }
+
     void inkInGapBetweenPagesIsIgnored()
     {
         m_canvas.setZoom(0.3); // видно промежуток между страницами
@@ -594,6 +658,7 @@ private slots:
 
         QCOMPARE(m_ink.strokeCount(), 1);
         const Stroke drawn = m_ink.allStrokes().first().stroke;
+        QCOMPARE(drawn.style, StrokeStyle::Tapered);
         const QPointF lastContact = m_canvas.viewToPage(drawn.page, lastView);
         const QPointF drawnEnd = drawn.points.constLast().position;
         QVERIFY2(std::hypot(drawnEnd.x() - lastContact.x(), drawnEnd.y() - lastContact.y()) < 1e-6,
@@ -625,6 +690,7 @@ private slots:
             QCOMPARE(restored.strokeCount(), 1);
             QVERIFY2(samePoints(restored.allStrokes().first().stroke.points, drawn.points, 1e-3),
                      "штрих из файла не совпал с нанесённым");
+            QCOMPARE(restored.allStrokes().first().stroke.style, drawn.style);
         }
 
         // Отмена и повтор.
@@ -634,10 +700,12 @@ private slots:
         QCOMPARE(m_ink.strokeCount(), 1);
         QVERIFY2(samePoints(m_ink.allStrokes().first().stroke.points, drawn.points, 0.0),
                  "штрих после отмены и повтора не совпал с нанесённым");
+        QCOMPARE(m_ink.allStrokes().first().stroke.style, drawn.style);
 
         // Экспорт вписывает контур из тех же точек; его торец - точка отрыва.
         StrokeTessellator tessellator;
         tessellator.setWidth(drawn.width);
+        tessellator.setStyle(drawn.style);
         const QVector<StrokeTessellator::Vertex> strip = tessellator.tessellate(drawn.points);
         QVERIFY(!tessellator.outline(drawn.points).isEmpty());
         const QPointF capCenter((strip[strip.size() - 2].x + strip[strip.size() - 1].x) / 2.0,
