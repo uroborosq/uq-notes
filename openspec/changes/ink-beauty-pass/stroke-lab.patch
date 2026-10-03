@@ -1,0 +1,3012 @@
+diff --git a/tools/stroke-lab/CMakeLists.txt b/tools/stroke-lab/CMakeLists.txt
+index 610494e..ef493f6 100644
+--- a/tools/stroke-lab/CMakeLists.txt
++++ b/tools/stroke-lab/CMakeLists.txt
+@@ -3,7 +3,8 @@
+ # Собирается отдельно от приложения (быстро, без QML/PDF):
+ #   cmake -S tools/stroke-lab -B build-lab -G Ninja -DCMAKE_BUILD_TYPE=Release
+ #   cmake --build build-lab
+-# или вместе с приложением: -DUQ_BUILD_STROKE_LAB=ON в корневом CMake.
++# или вместе с приложением: -DUQ_BUILD_STROKE_LAB=ON в корневом CMake. В пакет
++# не входит: install() здесь нет.
+ cmake_minimum_required(VERSION 3.21)
+ 
+ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+@@ -36,8 +37,11 @@ file(GLOB STROKE_LAB_VARIANTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/vari
+ add_executable(stroke-lab
+     main.cpp
+     corpus.cpp
++    endcheck.cpp
+     metrics.cpp
+     raster.cpp
++    aaraster.cpp
++    rastermetrics.cpp
+     render.cpp
+     ${STROKE_LAB_VARIANTS}
+ )
+@@ -47,3 +51,10 @@ target_include_directories(stroke-lab PRIVATE
+ )
+ target_link_libraries(stroke-lab PRIVATE stroke_lab_ink Qt6::Core Qt6::Gui)
+ set_target_properties(stroke-lab PROPERTIES AUTOMOC OFF)
++
++# Качество кромки тонкой линии: MSAA 4x/8x/16x против аналитического покрытия
++# (exp/dry-refine). От вариантов не зависит.
++add_executable(stroke-lab-aabench aabench.cpp raster.cpp)
++target_include_directories(stroke-lab-aabench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
++target_link_libraries(stroke-lab-aabench PRIVATE Qt6::Core Qt6::Gui)
++set_target_properties(stroke-lab-aabench PROPERTIES AUTOMOC OFF)
+diff --git a/tools/stroke-lab/README.md b/tools/stroke-lab/README.md
+index 607eaef..92bf79a 100644
+--- a/tools/stroke-lab/README.md
++++ b/tools/stroke-lab/README.md
+@@ -6,18 +6,33 @@
+ PNG и метрики в JSON. Работает без экрана (`QT_QPA_PLATFORM=offscreen`
+ выставляется сам).
+ 
++Стенд - часть основного дерева (`openspec/changes/ink-beauty-pass/design.md`,
++D1): каждое число дизайна воспроизводится командой отсюда. В пакет он не
++входит.
++
+ ## Сборка и запуск
+ 
++Вместе с приложением (так проверяются шаги ink-beauty-pass):
++
++```sh
++cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUQ_BUILD_STROKE_LAB=ON
++cmake --build build -j$(nproc) --target stroke-lab stroke-lab-aabench
++./build/tools/stroke-lab/stroke-lab --list                     # варианты и сэмплы
++./build/tools/stroke-lab/stroke-lab --variants baseline,foo --out /tmp/lab
++./build/tools/stroke-lab/stroke-lab --variants foo --samples 'small_*,word_hello' --scales 2.5 --out /tmp/lab
++```
++
++Отдельно, без QML и PDF (быстрее, не нужен qpdf):
++
+ ```sh
+ cmake -S tools/stroke-lab -B build-lab -G Ninja -DCMAKE_BUILD_TYPE=Release
+ cmake --build build-lab
+-./build-lab/stroke-lab --list                     # варианты и сэмплы
+-./build-lab/stroke-lab --variants baseline,foo --out /tmp/lab
+-./build-lab/stroke-lab --variants foo --samples 'small_*,word_hello' --scales 2.5 --out /tmp/lab
++./build-lab/stroke-lab --list
+ ```
+ 
+-`build-lab/` попадает под `build-*/` в `.gitignore`. Можно собирать и вместе с
+-приложением: `-DUQ_BUILD_STROKE_LAB=ON` в корневом CMake.
++`build/` и `build-lab/` попадают под `.gitignore`. Опция `UQ_BUILD_STROKE_LAB`
++по умолчанию выключена, поэтому обычная сборка и `packaging/PKGBUILD` стенд не
++собирают, а `install()` у стенда нет.
+ 
+ Ключи:
+ 
+@@ -29,9 +44,49 @@ cmake --build build-lab
+ | `--width 1.0` | `1.0` | толщина пера в точках страницы (`m_penWidth` по умолчанию 1.0; в меню 0.4…4.5) |
+ | `--dpr 1` | `1` | devicePixelRatio экрана; на HiDPI задавайте 1.5/2 |
+ | `--reps 3` | `3` | повторы для замера CPU, берётся минимум на событие |
+-| `--no-png` | | только метрики (быстро) |
++| `--min-width-factor f` | `0.25` | нижний предел эталонного закона толщины `w·(f + (1−f)·p)`; для вариантов с законом стиля 1 (D3) - `0.08` |
++| `--noise 0.05` | `0.05` | шум датчика σ, px |
++| `--rate 481` | `481` | частота пера, Гц |
++| `--libinput-smoothing` | | эмулировать среднее 4 последних отсчётов libinput (`tablet_smoothen_axes`) |
++| `--no-png` | | только метрики (быстро); `raster_vs_*` без PNG не считаются |
++| `--no-raster` | | без метрик растеризации `aa_*`, `marker_*` |
++| `--shifts 8` | `8` | субпиксельных сдвигов для `aa_flicker` |
++| `--endcheck` | | вместо корпуса - синтетика концов штриха и окружность с шумом, печатает таблицы и выходит |
+ 
+-Весь прогон baseline (27 сэмплов × 2 масштаба, PNG) - около 2 с.
++Весь прогон baseline (29 сэмплов × 2 масштаба, PNG и растровые метрики) -
++около 3.5 с.
++
++## Числа дизайна: проверка baseline
++
++Числа `design.md` посчитаны на корпусе из 27 сэмплов - до того, как в него
++вошли `dots_tap` и `dots_taps`. Средние по корпусу от двух новых сэмплов
++сдвигаются, поэтому сверка идёт по прежнему списку:
++
++```sh
++SAMPLES=ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello
++./build/tools/stroke-lab/stroke-lab --variants baseline --no-png --samples $SAMPLES --out /tmp/lab-baseline
++```
++
++Ожидаемое в `/tmp/lab-baseline/summary.md`, масштаб 1:
++
++| столбец | ключ `summary.json` | baseline |
++|---|---|---|
++| dev mean | `centerline_dev_mean_px@mean` | 0.1068 |
++| corner mean / max | `corner_dist_mean_px@mean` / `corner_dist_max_px@max` | 0.5618 / 1.413 |
++| facets>2° | `facet_count_2deg@sum` | 2818 |
++| curvTV excess | `curvature_tv_excess_per100px@mean` | 3.252 |
++| small H% | `shape_hausdorff_pct@mean` | 6.616 |
++| w ratio | `width_mean_ratio@mean` | 0.9257 |
++| w track | `width_track_rms_rel@mean` | 0.1628 |
++| w rise px | `width_rise_px@mean` | 36.36 |
++| w end | `width_end_ratio@mean` | 0.9496 |
++| gap22 med | `frame_gap_px_med_L22@mean` | 9.494 |
++| AA rmse | `aa_rmse_shape@mean` | 27.63 |
++| flicker | `aa_flicker@mean` | 18.68 |
++| mut | `settled_mutations@sum` | 0 |
++| µs/ev | `cpu_us_per_event_mean@mean` | около 2.2 (зависит от машины) |
++
++Всё, кроме `µs/ev`, детерминировано и должно совпасть до последнего знака.
+ 
+ ## Что получается в `--out`
+ 
+@@ -44,15 +99,18 @@ truth/<sample>_s<scale>.png    эталон 1:1
+ <variant>/metrics.json         все метрики по каждому сэмплу и масштабу
+ <variant>/png/<tag>.png        как в приложении, 1:1 (физические пиксели)
+ <variant>/png/<tag>_ideal.png  осевая линия варианта, нарисованная идеально (см. ниже)
+-<variant>/wet/<tag>.png        кадр мокрого штриха на 60% отсчётов, ×4
++<variant>/wet/<tag>.png        лента мокрых кадров на 30/45/60/75% отсчётов, ×4
+ <variant>/crops/<tag>.png      фрагмент ×8
++<variant>/marker/<tag>.png     тот же штрих полупрозрачным маркером
++<variant>/aaerr/<tag>.png      карта ошибки сглаживания ×4: красное - темнее точного покрытия, синее - светлее
+ ```
+ 
+ Столбцы картинок:
+ 
+ - **truth (ideal AA)** - эталонная траектория без тремора и шума, толщина по
+   эталонному давлению по закону приложения
+-  (`width·(0.25 + 0.75·p)`), круглая кисть, покрытие по решётке 8×8.
++  (`width·(0.25 + 0.75·p)`, нижний предел меняет `--min-width-factor`),
++  круглая кисть, покрытие по решётке 8×8.
+ - **app** - сухая геометрия варианта, растеризованная эмуляцией MSAA 4x (или
+   своей растеризацией варианта).
+ - **ideal raster** - та же осевая линия и толщина варианта, но круглой кистью
+@@ -60,8 +118,10 @@ truth/<sample>_s<scale>.png    эталон 1:1
+   растеризации; разница ideal ↔ truth - вклад сглаживания траектории и
+   давления.
+ - **wet** - оранжевые точки - отсчёты пера, зелёная линия - эталон до этого
+-  момента, красные точки - провизорный хвост, красное кольцо - кончик мокрой
+-  линии, синий крест - положение пера.
++  момента, пурпурный пунктир - путь пера ещё на 22 мс вперёд (где перо будет в
++  момент фотона), пурпурный косой крест - это положение, красные точки -
++  провизорный хвост, красное кольцо - кончик мокрой линии, синий крест -
++  положение пера в отсчёте.
+ 
+ ## Растеризация «как в приложении»
+ 
+@@ -86,6 +146,8 @@ truth/<sample>_s<scale>.png    эталон 1:1
+ 
+ `CoverageBuffer::compositeOntoLinear` - то же, но со смешиванием в линейном
+ свете, для вариантов, которые хотят проверить гамма-корректное сглаживание.
++`SamplePattern::lattice64` - 64 точки решётки ранга 1, эталон для метрик
++растеризации (у `grid(8)` почти горизонтальная кромка даёт только 8 уровней).
+ 
+ ## Корпус (`corpus.cpp`)
+ 
+@@ -101,6 +163,11 @@ truth/<sample>_s<scale>.png    эталон 1:1
+   части по остриям; часть - centripetal Catmull-Rom через свои точки, наклон
+   12°, лёгкий разброс точек (σ = 0.025 x-height). Точки над `i` пишутся после
+   слова отдельными штрихами.
++- **Точки-касания.** `dots_tap` (тег `tap`) - пять касаний со сдвигом
++  0.15…3 px на 15 px/s: точка над i, пунктуация; видно, пропадает ли касание и
++  какой оно формы. `dots_taps` (тег `dots`) - шесть касаний со сдвигом
++  0.3…3 px на 60 px/s. Касание совсем без сдвига корпус не умеет (эталону
++  нужно 2 точки); ближайшее к нему - касание со сдвигом 0.3 px в `--endcheck`.
+ - **Скорость.** Закон 2/3: `v = cruise · clamp((κref/κ)^(1/3), 0.35, 1.6)`,
+   `κref = 1/curvatureRadius`; в каждом острие и на касании/отрыве скорость
+   гладко уходит в ноль (разгон smoothstep 35 мс, торможение `v ∝ √(остаток)`
+@@ -109,14 +176,16 @@ truth/<sample>_s<scale>.png    эталон 1:1
+ - **Давление.** Нарастание за 30 мс от 0.05, спад за 40 мс к отрыву, база
+   0.48…0.6 с медленной волной 0.9 и 2.3 Гц, на быстром чуть легче; шум σ 0.004,
+   квантование 1/4096.
+-- **Отсчёты пера.** 481 Гц со случайной фазой; метка времени округлена вниз до
+-  1 мс (как `QEvent::timestamp()`); положение = эталон + физиологический тремор
+-  (по 3 синусоиды 8–12 Гц на ось, амплитуда 0.12–0.3 px, модуляция 1.3 Гц) +
+-  шум датчика σ 0.05 px, квантование 1/256 px (`wl_fixed`).
++- **Отсчёты пера.** 481 Гц (`--rate`) со случайной фазой; метка времени
++  округлена вниз до 1 мс (как `QEvent::timestamp()`); положение = эталон +
++  физиологический тремор (по 3 синусоиды 8–12 Гц на ось, амплитуда 0.12–0.3 px,
++  модуляция 1.3 Гц) + шум датчика σ 0.05 px (`--noise`), квантование 1/256 px
++  (`wl_fixed`); `--libinput-smoothing` усредняет 4 последних отсчёта, как
++  libinput для части планшетов.
+ - Острия с поворотом > 45° записываются как эталонные вершины углов.
+ 
+-Генератор детерминирован (свой splitmix64 и Box-Muller), корпус одинаков на
+-любой машине.
++Генератор детерминирован (свой splitmix64 и Box-Muller), у каждого сэмпла своё
++зерно, корпус одинаков на любой машине.
+ 
+ ## Метрики (`metrics.cpp`, все в экранных логических px)
+ 
+@@ -124,23 +193,123 @@ truth/<sample>_s<scale>.png    эталон 1:1
+ |---|---|
+ | `centerline_dev_mean/rms/max_px` | расстояние точек итоговой осевой до эталонной ломаной |
+ | `truth_coverage_mean/max_px` | обратное: точки эталона (шаг 0.5 px) до осевой - ловит срезанные углы и сжатые петли |
+-| `facet_count_2deg`, `facet_max_deg`, `facet_p99_deg` | грань: `|θ_i − (θ_{i−1}+θ_{i+1})/2|` по вершинам осевой (θ - угол поворота), без 2 px у концов и 4 px у углов |
++| `facet_count_2deg`, `facet_max_deg`, `facet_p99_deg` | грань: `|θ_i − (θ_{i−1}+θ_{i+1})/2|` по вершинам осевой (θ - угол поворота), без 2 px у концов и 4 px у углов; `STROKE_LAB_DEBUG_FACETS=1` печатает грани больше 60° |
+ | `turn_max_deg` | наибольший поворот в одной вершине там же |
+ | `curvature_tv_per100px`, `_truth_`, `_excess_`, `_ratio` | Σ|Δκ| на равномерной нарезке 1 px (κ - поворот на шаг), на 100 px длины; excess = вариант − эталон, ratio = (tv+1)/(tv_gt+1) |
+-| `corner_dist_mean/max_px` | от эталонной вершины угла до осевой |
++| `corner_dist_mean/max_px` | от эталонной вершины угла до осевой; `STROKE_LAB_DEBUG_CORNERS=1` печатает каждую вершину |
+ | `shape_dev_mean_pct`, `shape_hausdorff_pct` | для `small`: отклонение / x-height, % |
+ | `closed_area_ratio` | для `closed` (буквы o): площадь осевой / площадь эталона |
+ | `width_tv_per100px` (+`_truth_`), `width_hf_rms_px`, `width_mean_ratio` | толщина вдоль дуги (1 px): Σ|Δw|, ВЧ-остаток после скользящего среднего 9 px, средняя толщина / эталонная |
++| `width_track_rms_px`, `width_track_rms_rel` | RMS разности толщины варианта и эталона при сопоставлении по доле длины дуги (абсолютно и к средней эталонной) - ловит запаздывание фильтра давления; гейт шага 1: `width_track_rms_rel` ≤ 0.03 |
++| `width_rise_px`, `width_fall_px` (+`_truth_`) | длина дуги от начала / до конца, пока толщина ниже 90% медианы штриха (заход и выход) |
++| `width_start_ratio`, `width_end_ratio` (+`_truth`) | средняя толщина первых / последних 3 отсчётов нарезки (≈2 px) к медиане штриха: тупой конец ≈ 1, заострённый < 1 |
++| `width_start_err_px`, `width_end_err_px`, `width_body_err_px` | ошибка толщины к эталону в той же точке эталона (проекция): первые и последние 10 px дуги эталона и тело |
++| `width_step_max_px` (+`_truth_`), `width_body_cv` (+`_truth`) | наибольший скачок толщины на 1 px дуги; коэффициент вариации толщины в теле штриха |
++| `width_err_mean_px`, `width_err_rel_mean_pct` | ошибка толщины к эталону в ближайшей точке эталона вдоль осевой (шаг 1 px) |
++| `width_touch_ratio`, `width_lift_ratio` | толщина первой / последней точки осевой к эталонной толщине на касании / отрыве |
++| `width_end_jump_max_pct` (+`_truth_`) | наибольший относительный скачок толщины на последних 3 точках («клюв» на отрыве) |
++| `pressure_lag_ms`, `pressure_err_mean` | сдвиг давления осевой к эталону, при котором они лучше всего совпадают, и ошибка давления без сдвига |
+ | `wet_lag_px_*` | кончик мокрой линии ↔ положение пера в этом отсчёте |
+ | `wet_lag_truth_px_mean` | кончик ↔ эталон в настоящий момент отсчёта |
+ | `wet_lag_ms_mean/p95` | время ближайшей к кончику точки эталона в окне [−60, +10] мс, только где перо быстрее 50 px/s |
+ | `wet_vs_final_mean/max_px` | насколько провизорный хвост расходится с итоговой осевой |
+-| `settled_mutations` | сколько «окончательных» точек потом изменилось (должно быть 0) |
++| `frame_*` | эмуляция кадров, см. ниже |
++| `settled_mutations` | сколько «окончательных» точек потом изменилось положением или толщиной (должно быть 0) |
+ | `cpu_us_per_event_mean/p50/p99/max`, `cpu_us_finish` | время `addEvent` (минимум по повторам) и `finish` |
+ | `final_vertices`, `centerline_points`, `wet_dirty_vertices_mean` | размер сухой геометрии и сколько вершин мокрой полосы перезаливается на событие |
++| `raster_vs_ideal_rms/_p99/_ink_ratio` | только с PNG: покрытие картинки «app» против «ideal raster» той же осевой (вклад тесселяции и растеризации): RMS и p99 по пикселям с покрытием, масса чернил Σcov/Σcov эталона |
++| `raster_vs_truth_rms/_p99/_ink_ratio` | то же против картинки truth (всё вместе: траектория, толщина, растеризация); на `dots_taps` - доля чернил точек |
++| `width_cv`, `width_p5_physpx`, `width_mean_physpx` | ровность толщины: коэффициент вариации полной толщины по осевой (взвешен длиной), 5-й перцентиль и среднее в физических px |
++
++### Эмуляция кадров (`frame_*`)
++
++Кадр 120 Гц защёлкивает мокрое состояние в момент t_l: в него попадают
++отсчёты, чьё настоящее время + 2 мс (доставка ввода) не позже t_l. Фотон
++выходит через L − 2 мс после защёлки, то есть L - полная задержка «перо →
++фотон»; L = 16, 22 и 28 мс (суффикс `_L16`, `_L22`, `_L28`), фаза кадров
++перебирается четырьмя сдвигами.
++
++| ключ | что меряет |
++|---|---|
++| `frame_gap_px_mean/med/p95_L*` | длина дуги эталона от проекции кончика до пера в момент фотона - «линия не успевает»; только где перо быстрее 50 px/s |
++| `frame_gap_fast_px_med_L*` | то же на 150-600 px/s |
++| `frame_gap_ms_med_L*` | тот же зазор во времени |
++| `frame_ahead_px_p99/max_L*` | кончик впереди настоящего пера |
++| `frame_lift_ahead_px_max` | то же после отрыва, пока отрыв не обработан («запятая») |
++| `frame_offpath_px_p99/max` | дальняя точка провизорного хвоста от эталона в окне [−80, +60] мс - вылет мимо траектории |
++| `frame_retract_px_p95/p99` | насколько хвост кадра не совпал с линией следующего кадра - «втягивание» |
++| `frame_heading_err_deg_p95`, `frame_wag_deg_p95` | курс кончика против касательной эталона и его скачок между кадрами - «виляние» |
++| `frame_tail_vs_final_px_p95/p99` | дальняя точка хвоста кадра от итоговой осевой |
++
++Лаг и зазор меряются на модели доставки и кадра; настоящая задержка устройства
++меряется в приложении (`UQ_FRAME_LOG`, `PERFORMANCE.md`).
++
++## Метрики растеризации (`rastermetrics.cpp`)
++
++Считаются для каждого варианта поверх траекторных (выключаются `--no-raster`,
++число субпиксельных сдвигов - `--shifts 8`). Ошибки - доли покрытия ×255.
++Эталонное покрытие - `SamplePattern::lattice64`.
++
++| ключ | что меряет |
++|---|---|
++| `aa_rmse_shape`, `aa_p99_shape`, `aa_max_shape` | пиксели варианта против точного покрытия его же геометрии, только кромка (частичное покрытие хотя бы в одном) - чистая ошибка сглаживания |
++| `aa_rmse_ideal` | против круглой кисти по осевой варианта (сглаживание + стыки/торцы) |
++| `aa_rmse_truth` | против эталона (всё вместе) |
++| `aa_flicker` | «дыхание» кромки при пане: std по субпиксельным сдвигам ошибки (вариант − форма), среднее по пикселям |
++| `aa_mass_breath_pct` | std/mean суммарной массы чернил по сдвигам, % |
++| `aa_mass_ratio` | масса чернил / масса идеальной кисти |
++| `aa_mass_cv` | «бусины»: масса в отрезках осевой по 2 px относительно идеала, коэффициент вариации |
++| `marker_dark_frac`, `marker_alpha_max` | тот же штрих маркером `#66f2d024`: доля пикселей с альфой > 0.41 (двойное наложение) |
++
++## `--endcheck`: концы штриха (`endcheck.cpp`)
++
++Прямая на 100 / 300 / 600 px/s, 481 Гц, метки по 1 мс, без шума; давление
++нарастает 0.05 → 0.6 за 15 мс и спадает до нуля за 12 мс до отрыва. Плюс
++касание со сдвигом 0.3 px за 30 мс и окружность r = 20 px с коррелированным
++шумом AR(1) (ρ 0.6, σ 0.3 px).
++
++```sh
++./build/tools/stroke-lab/stroke-lab --variants baseline,foo --endcheck
++```
++
++| столбец | смысл |
++|---|---|
++| `entry px` / `exit px` (+`ref`) | длина дуги от начала / до конца, пока толщина ниже 90% плато; `ref` - закон приложения на настоящем давлении |
++| `step_end` | наибольший относительный скачок толщины на последних 3 толщинах плато |
++| `cap_dev` | отклонение вершин геометрии за концом штриха от окружности радиуса полутолщины, в долях радиуса: 0 - полудиск, 1 - плоский торец; гейт шага 2: ≤ 0.05 |
++| `tap aspect` | отношение сторон охвата геометрии касания: 1 - диск |
++| `residual px`, `rough deg`, `radius bias px` | окружность: СКО радиального отклонения, СКО второй разности угла касательной, смещение радиуса |
++
++## `stroke-lab-aabench`: кромка тонкой линии
++
++```sh
++./build/tools/stroke-lab/stroke-lab-aabench --out /tmp/aabench
++```
++
++Прямые полосы 0.25-3 device px под углами 0-45°: СКО покрытия к точной площади,
++«бусинистость» (CV суммы покрытия по поперечному срезу) и перепад пика для MSAA
++4x/8x/16x и аналитических формул. Пишет `aabench.json` и `aabench.png`. От
++вариантов не зависит.
++
++## Откуда что
++
++Стенд пришёл из `exp/stroke-lab` (720b497), метрики - из веток прототипов:
++
++| ветка | что перенесено |
++|---|---|
++| `exp/rnote` | профиль толщины (`width_track_*`, `width_rise/fall_*`, `width_start/end_ratio`), `--min-width-factor` |
++| `exp/outline` | `raster_vs_ideal/truth_*`, `width_cv`, `width_p5_physpx`, сэмпл `dots_tap` |
++| `exp/google-ink` | сэмпл `dots_taps` |
++| `exp/trajectory` | `--noise`, `--rate`, `--libinput-smoothing` |
++| `exp/apps-survey` | `--endcheck`, `width_*_err_px`, `width_step_max_px`, `width_body_cv`, толщина в `settled_mutations` |
++| `exp/latency` | эмуляция кадров `frame_*`, лента мокрых кадров |
++| `exp/dry-refine` | `width_err_*`, `width_touch/lift_ratio` (в ветке - `width_start/end_ratio`), `width_end_jump_*`, `pressure_lag_ms`, `stroke-lab-aabench` |
++| `exp/antialias` | `rastermetrics.cpp`, `aaraster.*`, `SamplePattern::lattice64` |
+ 
+-Лаг меряется до положения пера в отсчёте; задержка доставки событий и кадра
+-сюда не входит (она одинакова у всех вариантов).
++Варианты прототипов остаются в своих ветках; шаг изменения, который берёт
++решение, приносит с собой и его вариант (`git show exp/<ветка>:tools/stroke-lab/variants/<файл>`).
++GPU-замер `aa-gpu-bench` (`exp/antialias`, `gpu/`) рисует полосой варианта
++`aa-fringe`, поэтому переносится вместе с ним в шаге 3.
+ 
+ ## Как добавить вариант
+ 
+@@ -157,10 +326,10 @@ truth/<sample>_s<scale>.png    эталон 1:1
+    - необязательно: `wetGeometry()` для снимка мокрого кадра и
+      `rasterize(Geometry, RasterTarget)` - своя растеризация (вершинная альфа,
+      аналитическое сглаживание, шейдерная эмуляция); верните `true`, если
+-     нарисовали. Помощники - `CoverageBuffer` из `raster.h`.
++     нарисовали. Помощники - `CoverageBuffer` из `raster.h`, `aaraster.h`.
+ 3. В конце файла: `STROKE_LAB_VARIANT(MyVariant, "my-variant", "описание");`
+-4. `cmake --build build-lab` (новый файл подхватывается сам через
+-   `CONFIGURE_DEPENDS`) и `./build-lab/stroke-lab --variants baseline,my-variant --out ...`.
++4. Пересоберите (новый файл подхватывается сам через `CONFIGURE_DEPENDS`) и
++   `stroke-lab --variants baseline,my-variant --out ...`.
+ 
+ Можно наследоваться от классов приложения (`StrokeSampler`, `WetStroke`,
+ `StrokeTessellator` из `src/ink`) или скопировать их в вариант и менять
+diff --git a/tools/stroke-lab/aabench.cpp b/tools/stroke-lab/aabench.cpp
+new file mode 100644
+index 0000000..d553281
+--- /dev/null
++++ b/tools/stroke-lab/aabench.cpp
+@@ -0,0 +1,326 @@
++// stroke-lab-aabench: качество кромки тонкой прямой линии при разных способах
++// растеризации (exp/dry-refine, эксперимент 2 из плана критика).
++//
++// Прямая полоса толщины w (device px) под углом θ проходит через всё
++// изображение. Способы:
++//   msaa4 / msaa8 / msaa16 - точки выборки стандартных шаблонов, полоса из двух
++//     треугольников, resolve - среднее по точкам (как в приложении, без гаммы);
++//   an-ink - покрытие clamp(r + 0.5 − d, 0, 1) по расстоянию до осевой; тоньше
++//     1 px - ширина 1 px и альфа 2r (google/ink: минимальная ширина с
++//     масштабированием прозрачности);
++//   an-box - |[d − r, d + r] ∩ [−½, ½]|: точный бокс-фильтр для полосы вдоль оси;
++//   an-trap - то же, но пиксель проецируется на нормаль как трапеция: точная
++//     площадь для прямой полосы под любым углом (нужен только наклон нормали -
++//     в шейдере это производная расстояния);
++//   reference - точная площадь пересечения пикселя с полосой (численно, 64×64
++//     подвыборок на пиксель).
++// Метрики по пикселям в полосе |d| <= r + 2 вдали от краёв изображения:
++//   rms - СКО ошибки покрытия относительно reference;
++//   cv  - «бусинистость»: коэффициент вариации суммы покрытия по столбцу
++//     (поперечный срез линии) вдоль линии; у reference ≈ 0;
++//   peak - перепад наибольшего покрытия пикселя в срезе (max − min вдоль линии):
++//     то, что глаз видит как тёмные точки и бледные провалы.
++//
++// Запуск: stroke-lab-aabench [--out DIR] - печатает таблицу, пишет aabench.json и
++// aabench.png (линии ×8).
++
++#include <QCoreApplication>
++#include <QDir>
++#include <QFile>
++#include <QImage>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QPainter>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <functional>
++#include <vector>
++
++#include "raster.h"
++
++namespace {
++
++constexpr int kSize = 160;
++
++struct Line
++{
++    double width;  // device px
++    double angle;  // градусы
++    double offset; // сдвиг осевой по нормали, px (доля пикселя)
++    QPointF n() const
++    {
++        const double a = angle * M_PI / 180.0;
++        return QPointF(-std::sin(a), std::cos(a));
++    }
++    QPointF dir() const
++    {
++        const double a = angle * M_PI / 180.0;
++        return QPointF(std::cos(a), std::sin(a));
++    }
++    QPointF center() const { return QPointF(kSize / 2.0, kSize / 2.0) + n() * offset; }
++    double dist(const QPointF &p) const
++    {
++        const QPointF d = p - center();
++        return d.x() * n().x() + d.y() * n().y();
++    }
++};
++
++using Coverage = std::vector<double>;
++
++Coverage reference(const Line &l)
++{
++    Coverage c(kSize * kSize, 0.0);
++    const int sub = 64;
++    const double r = l.width / 2.0;
++    for (int y = 0; y < kSize; ++y)
++        for (int x = 0; x < kSize; ++x) {
++            if (std::abs(l.dist(QPointF(x + 0.5, y + 0.5))) > r + 1.0)
++                continue;
++            int in = 0;
++            for (int j = 0; j < sub; ++j)
++                for (int i = 0; i < sub; ++i)
++                    if (std::abs(l.dist(QPointF(x + (i + 0.5) / sub, y + (j + 0.5) / sub))) <= r)
++                        ++in;
++            c[size_t(y * kSize + x)] = double(in) / (sub * sub);
++        }
++    return c;
++}
++
++lab::SamplePattern pattern(int n)
++{
++    static const int o8[8][2] = {{1, -3}, {-1, 3}, {5, 1}, {-3, -5}, {-5, 5}, {-7, -1}, {3, 7}, {7, -7}};
++    static const int o16[16][2] = {{1, 1}, {-1, -3}, {-3, 2}, {4, -1}, {-5, -2}, {2, 5}, {5, 3}, {3, -5},
++                                   {-2, 6}, {0, -7}, {-4, -6}, {-6, 4}, {-8, 0}, {7, -4}, {6, 7}, {-7, -8}};
++    if (n == 4)
++        return lab::SamplePattern::msaa4();
++    lab::SamplePattern p;
++    for (int i = 0; i < n; ++i) {
++        const int *o = n == 8 ? o8[i] : o16[i];
++        p.offsets.emplace_back(0.5 + o[0] / 16.0, 0.5 + o[1] / 16.0);
++    }
++    return p;
++}
++
++Coverage msaa(const Line &l, int n)
++{
++    lab::CoverageBuffer buf(kSize, kSize, pattern(n));
++    const QPointF c = l.center(), d = l.dir() * (kSize * 2.0), nn = l.n() * (l.width / 2.0);
++    buf.addConvex({c - d + nn, c + d + nn, c + d - nn, c - d - nn});
++    Coverage out(kSize * kSize);
++    for (int y = 0; y < kSize; ++y)
++        for (int x = 0; x < kSize; ++x)
++            out[size_t(y * kSize + x)] = buf.coverage(x, y);
++    return out;
++}
++
++// google/ink: ширина не меньше 1 px, альфа 2r.
++Coverage analyticInk(const Line &l)
++{
++    Coverage out(kSize * kSize);
++    const double r = l.width / 2.0;
++    const double re = std::max(r, 0.5);
++    const double alpha = std::min(1.0, 2.0 * r);
++    for (int y = 0; y < kSize; ++y)
++        for (int x = 0; x < kSize; ++x) {
++            const double d = std::abs(l.dist(QPointF(x + 0.5, y + 0.5)));
++            out[size_t(y * kSize + x)] = std::clamp(re + 0.5 - d, 0.0, 1.0) * alpha;
++        }
++    return out;
++}
++
++// Покрытие пикселя полосой |x − d| <= r, где x - координата по нормали n:
++// проекция единичного квадрата на n - трапеция с опорой [−a, a],
++// a = (|nx| + |ny|)/2, и плато [−b, b], b = ||nx| − |ny||/2. Покрытие -
++// F(d + r) − F(d − r), F - функция распределения трапеции. Вдоль оси (a = b =
++// ½) это ровно бокс-фильтр; на 45° учитывает, что пиксель по нормали шире.
++inline double trapezoidCdf(double x, double a, double b)
++{
++    const double h = 1.0 / (a + b);
++    if (x <= -a)
++        return 0.0;
++    if (x >= a)
++        return 1.0;
++    if (x < -b)
++        return h * (x + a) * (x + a) / (2.0 * (a - b));
++    if (x <= b)
++        return h * (a - b) / 2.0 + h * (x + b);
++    return 1.0 - h * (a - x) * (a - x) / (2.0 * (a - b));
++}
++
++inline double stripCoverage(double d, double r, double nx, double ny)
++{
++    const double ax = std::abs(nx), ay = std::abs(ny);
++    const double a = (ax + ay) / 2.0, b = std::abs(ax - ay) / 2.0;
++    return std::max(0.0, trapezoidCdf(d + r, a, b) - trapezoidCdf(d - r, a, b));
++}
++
++// Трапеция: точная площадь для бесконечной прямой полосы.
++Coverage analyticTrap(const Line &l)
++{
++    Coverage out(kSize * kSize);
++    const double r = l.width / 2.0;
++    const QPointF n = l.n();
++    for (int y = 0; y < kSize; ++y)
++        for (int x = 0; x < kSize; ++x)
++            out[size_t(y * kSize + x)] = stripCoverage(l.dist(QPointF(x + 0.5, y + 0.5)), r, n.x(), n.y());
++    return out;
++}
++
++// Бокс-фильтр по расстоянию: |[d − r, d + r] ∩ [−½, ½]|.
++Coverage analyticBox(const Line &l)
++{
++    Coverage out(kSize * kSize);
++    const double r = l.width / 2.0;
++    for (int y = 0; y < kSize; ++y)
++        for (int x = 0; x < kSize; ++x) {
++            const double d = std::abs(l.dist(QPointF(x + 0.5, y + 0.5)));
++            out[size_t(y * kSize + x)] = std::max(0.0, std::min(d + r, 0.5) - std::max(d - r, -0.5));
++        }
++    return out;
++}
++
++struct Score
++{
++    double rms = 0, cv = 0, peak = 0;
++};
++
++Score score(const Line &l, const Coverage &c, const Coverage &ref)
++{
++    const double r = l.width / 2.0;
++    double se = 0;
++    int n = 0;
++    std::vector<double> sums, peaks;
++    for (int x = 20; x < kSize - 20; ++x) {
++        double s = 0, pk = 0;
++        for (int y = 0; y < kSize; ++y) {
++            const QPointF p(x + 0.5, y + 0.5);
++            if (std::abs(l.dist(p)) > r + 2.0)
++                continue;
++            const double v = c[size_t(y * kSize + x)];
++            const double e = v - ref[size_t(y * kSize + x)];
++            se += e * e;
++            ++n;
++            s += v;
++            pk = std::max(pk, v);
++        }
++        sums.push_back(s);
++        peaks.push_back(pk);
++    }
++    Score out;
++    out.rms = n ? std::sqrt(se / n) : 0;
++    double mean = 0;
++    for (double s : sums)
++        mean += s;
++    mean /= std::max<size_t>(1, sums.size());
++    double var = 0;
++    for (double s : sums)
++        var += (s - mean) * (s - mean);
++    var /= std::max<size_t>(1, sums.size());
++    out.cv = mean > 0 ? std::sqrt(var) / mean : 0;
++    out.peak = *std::max_element(peaks.begin(), peaks.end()) - *std::min_element(peaks.begin(), peaks.end());
++    return out;
++}
++
++QImage render(const Coverage &c, int x0, int y0, int w, int h, int zoom)
++{
++    const QColor ink(0x1c, 0x2a, 0x5a);
++    QImage img(w * zoom, h * zoom, QImage::Format_RGB32);
++    for (int y = 0; y < h; ++y)
++        for (int x = 0; x < w; ++x) {
++            const double v = c[size_t((y0 + y) * kSize + x0 + x)];
++            const QRgb px = qRgb(int(255 + (ink.red() - 255) * v), int(255 + (ink.green() - 255) * v),
++                                 int(255 + (ink.blue() - 255) * v));
++            for (int j = 0; j < zoom; ++j)
++                for (int i = 0; i < zoom; ++i)
++                    img.setPixel(x * zoom + i, y * zoom + j, px);
++        }
++    return img;
++}
++
++} // namespace
++
++int main(int argc, char **argv)
++{
++    QCoreApplication app(argc, argv);
++    QString out = QStringLiteral("aabench-out");
++    const QStringList args = app.arguments();
++    const int i = int(args.indexOf(QStringLiteral("--out")));
++    if (i >= 0 && i + 1 < args.size())
++        out = args[i + 1];
++    QDir().mkpath(out);
++
++    const std::vector<double> widths{0.25, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0};
++    const std::vector<double> angles{0, 3, 7, 12, 20, 30, 45};
++    const std::vector<std::pair<const char *, std::function<Coverage(const Line &)>>> methods{
++        {"msaa4", [](const Line &l) { return msaa(l, 4); }},
++        {"msaa8", [](const Line &l) { return msaa(l, 8); }},
++        {"msaa16", [](const Line &l) { return msaa(l, 16); }},
++        {"an-ink", [](const Line &l) { return analyticInk(l); }},
++        {"an-box", [](const Line &l) { return analyticBox(l); }},
++        {"an-trap", [](const Line &l) { return analyticTrap(l); }},
++    };
++
++    QJsonArray rows;
++    std::printf("%-6s", "w px");
++    for (const auto &m : methods)
++        std::printf(" | %-8s rms   cv%%  peak", m.first);
++    std::printf("\n");
++    for (double w : widths) {
++        std::vector<Score> agg(methods.size());
++        int count = 0;
++        for (double a : angles) {
++            for (double off : {0.0, 0.25, 0.5}) {
++                const Line l{w, a, off};
++                const Coverage ref = reference(l);
++                for (size_t m = 0; m < methods.size(); ++m) {
++                    const Score s = score(l, methods[m].second(l), ref);
++                    agg[m].rms += s.rms;
++                    agg[m].cv = std::max(agg[m].cv, s.cv);
++                    agg[m].peak = std::max(agg[m].peak, s.peak);
++                }
++                ++count;
++            }
++        }
++        std::printf("%-6.2f", w);
++        QJsonObject row;
++        row["width_px"] = w;
++        for (size_t m = 0; m < methods.size(); ++m) {
++            agg[m].rms /= count;
++            std::printf(" | %-8s %.3f %5.1f %5.2f", "", agg[m].rms, agg[m].cv * 100, agg[m].peak);
++            QJsonObject o;
++            o["rms_mean"] = agg[m].rms;
++            o["cv_max_pct"] = agg[m].cv * 100;
++            o["peak_range_max"] = agg[m].peak;
++            row[methods[m].first] = o;
++        }
++        std::printf("\n");
++        rows.append(row);
++    }
++    QFile f(out + QStringLiteral("/aabench.json"));
++    if (f.open(QIODevice::WriteOnly))
++        f.write(QJsonDocument(rows).toJson());
++
++    // Картинка: строки - ширины 0.4/0.6/1.0/1.5, столбцы - способы, линия 7°.
++    const int zoom = 8, cw = 48, ch = 14;
++    const std::vector<double> showW{0.4, 0.6, 1.0, 1.5};
++    QImage sheet((cw * zoom + 8) * int(methods.size() + 1) + 8, (ch * zoom + 8) * int(showW.size()) + 8,
++                 QImage::Format_RGB32);
++    sheet.fill(QColor(200, 200, 205));
++    QPainter p(&sheet);
++    for (size_t r = 0; r < showW.size(); ++r) {
++        const Line l{showW[r], 7.0, 0.25};
++        std::vector<Coverage> cs{reference(l)};
++        for (const auto &m : methods)
++            cs.push_back(m.second(l));
++        for (size_t c = 0; c < cs.size(); ++c)
++            p.drawImage(QPoint(8 + int(c) * (cw * zoom + 8), 8 + int(r) * (ch * zoom + 8)),
++                        render(cs[c], kSize / 2 - cw / 2, kSize / 2 - ch / 2, cw, ch, zoom));
++    }
++    p.end();
++    sheet.save(out + QStringLiteral("/aabench.png"));
++    std::fprintf(stderr, "columns: reference, msaa4, msaa8, msaa16, an-ink, an-box, an-trap; rows: w=0.4,0.6,1.0,1.5 px, 7°\n");
++    return 0;
++}
+diff --git a/tools/stroke-lab/aaraster.cpp b/tools/stroke-lab/aaraster.cpp
+new file mode 100644
+index 0000000..b06dce5
+--- /dev/null
++++ b/tools/stroke-lab/aaraster.cpp
+@@ -0,0 +1,85 @@
++#include "aaraster.h"
++
++namespace lab {
++
++SampleCountBuffer::SampleCountBuffer(int width, int height, SamplePattern pattern)
++    : m_width(std::max(1, width))
++    , m_height(std::max(1, height))
++    , m_pattern(std::move(pattern))
++    , m_count(int(m_pattern.offsets.size()))
++    , m_counts(size_t(m_width) * size_t(m_height) * size_t(m_count), 0)
++{
++}
++
++void SampleCountBuffer::addTriangle(const QPointF &a, const QPointF &b, const QPointF &c)
++{
++    const double area = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
++    if (!std::isfinite(area) || std::abs(area) < 1e-12)
++        return;
++    const int x0 = std::max(0, int(std::floor(std::min({a.x(), b.x(), c.x()}))));
++    const int x1 = std::min(m_width - 1, int(std::floor(std::max({a.x(), b.x(), c.x()}))));
++    const int y0 = std::max(0, int(std::floor(std::min({a.y(), b.y(), c.y()}))));
++    const int y1 = std::min(m_height - 1, int(std::floor(std::max({a.y(), b.y(), c.y()}))));
++    if (x0 > x1 || y0 > y1)
++        return;
++    const double sign = area > 0 ? 1.0 : -1.0;
++    const auto edge = [](const QPointF &p, const QPointF &q, double x, double y) {
++        return (q.x() - p.x()) * (y - p.y()) - (q.y() - p.y()) * (x - p.x());
++    };
++    for (int y = y0; y <= y1; ++y) {
++        for (int x = x0; x <= x1; ++x) {
++            for (int s = 0; s < m_count; ++s) {
++                const double sx = x + m_pattern.offsets[size_t(s)].x();
++                const double sy = y + m_pattern.offsets[size_t(s)].y();
++                // Ничьи - как у CoverageBuffer (>= 0): для маркера это может
++                // слегка завысить двойное наложение на общих рёбрах, но точка
++                // выборки ровно на ребре почти не встречается.
++                if (edge(a, b, sx, sy) * sign >= 0 && edge(b, c, sx, sy) * sign >= 0
++                    && edge(c, a, sx, sy) * sign >= 0) {
++                    uint8_t &n = m_counts[(size_t(y) * size_t(m_width) + size_t(x)) * size_t(m_count)
++                                          + size_t(s)];
++                    if (n < 255)
++                        ++n;
++                }
++            }
++        }
++    }
++}
++
++void SampleCountBuffer::addTriangleStrip(const std::vector<QPointF> &strip)
++{
++    for (size_t i = 0; i + 2 < strip.size(); ++i)
++        addTriangle(strip[i], strip[i + 1], strip[i + 2]);
++}
++
++void SampleCountBuffer::addTriangles(const std::vector<QPointF> &triangles)
++{
++    for (size_t i = 0; i + 2 < triangles.size(); i += 3)
++        addTriangle(triangles[i], triangles[i + 1], triangles[i + 2]);
++}
++
++void SampleCountBuffer::compositeOnto(QImage &image, const QColor &ink) const
++{
++    const double alpha = ink.alphaF();
++    const int w = std::min(m_width, image.width());
++    const int h = std::min(m_height, image.height());
++    for (int y = 0; y < h; ++y) {
++        QRgb *line = reinterpret_cast<QRgb *>(image.scanLine(y));
++        for (int x = 0; x < w; ++x) {
++            const uint8_t *c = &m_counts[(size_t(y) * size_t(m_width) + size_t(x)) * size_t(m_count)];
++            double acc = 0;
++            for (int s = 0; s < m_count; ++s)
++                if (c[s])
++                    acc += 1.0 - std::pow(1.0 - alpha, c[s]);
++            if (acc <= 0)
++                continue;
++            const double k = acc / m_count;
++            const QRgb bg = line[x];
++            const auto mix = [k](int b, int i) { return int(std::lround(b + (i - b) * k)); };
++            line[x] = qRgb(mix(qRed(bg), ink.red()), mix(qGreen(bg), ink.green()),
++                           mix(qBlue(bg), ink.blue()));
++        }
++    }
++}
++
++} // namespace lab
+diff --git a/tools/stroke-lab/aaraster.h b/tools/stroke-lab/aaraster.h
+new file mode 100644
+index 0000000..68e4d69
+--- /dev/null
++++ b/tools/stroke-lab/aaraster.h
+@@ -0,0 +1,186 @@
++#pragma once
++
++// Эмуляция растеризации с аналитическим сглаживанием - то, что делал бы
++// фрагментный шейдер без MSAA.
++//
++// FragmentRaster: одна точка выборки в центре пикселя, правило top-left на
++// общих рёбрах (общая кромка двух треугольников одной полосы закрашивается
++// ровно один раз), вершинные атрибуты интерполируются аффинно, как varying в
++// 2D. Колбэк получает пиксель и интерполированные атрибуты - это и есть
++// «фрагментный шейдер».
++//
++// AlphaBuffer: накопление альфы одного цвета. over() - обычное смешивание
++// GPU (src_alpha, one_minus_src_alpha), применённое к каждому фрагменту:
++// перекрывающиеся фрагменты одного штриха темнеют дважды. max() - объединение
++// по максимуму покрытия (BlendOp::Max/Min для чернил темнее фона или слой
++// штриха со «своим» max и последующим over).
++//
++// SampleCountBuffer: MSAA с подсчётом, сколько треугольников покрыло каждую
++// точку выборки, - нужен для полупрозрачного цвета (маркер): при смешивании
++// каждый треугольник, накрывший точку, кладёт альфу ещё раз.
++
++#include <QColor>
++#include <QImage>
++#include <QPointF>
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstdint>
++#include <vector>
++
++#include "raster.h"
++
++namespace lab {
++
++template<int N>
++struct AttrVertex
++{
++    QPointF p;               // пиксели изображения
++    std::array<float, N> a{}; // атрибуты
++};
++
++class FragmentRaster
++{
++public:
++    FragmentRaster(int width, int height) : m_width(width), m_height(height) {}
++
++    // frag(x, y, const std::array<float, N> &attrs)
++    template<int N, class F>
++    void triangle(const AttrVertex<N> &v0, const AttrVertex<N> &v1, const AttrVertex<N> &v2,
++                  F &&frag) const
++    {
++        QPointF a = v0.p, b = v1.p, c = v2.p;
++        const AttrVertex<N> *va = &v0, *vb = &v1, *vc = &v2;
++        double area = (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x());
++        if (!std::isfinite(area) || std::abs(area) < 1e-12)
++            return; // вырожденный треугольник GPU не рисует
++        if (area < 0) {
++            std::swap(b, c);
++            std::swap(vb, vc);
++            area = -area;
++        }
++        const int x0 = std::max(0, int(std::floor(std::min({a.x(), b.x(), c.x()}) - 0.5)));
++        const int x1 = std::min(m_width - 1, int(std::ceil(std::max({a.x(), b.x(), c.x()}) - 0.5)));
++        const int y0 = std::max(0, int(std::floor(std::min({a.y(), b.y(), c.y()}) - 0.5)));
++        const int y1 = std::min(m_height - 1, int(std::ceil(std::max({a.y(), b.y(), c.y()}) - 0.5)));
++        if (x0 > x1 || y0 > y1)
++            return;
++        // e(p,q) > 0 внутри (area > 0). На ничьей (точка ровно на ребре)
++        // ребро «своё», только если его направление в выбранной полуплоскости:
++        // общее ребро двух согласованно ориентированных треугольников
++        // проходится в противоположные стороны, поэтому достаётся одному.
++        const auto edge = [](const QPointF &p, const QPointF &q, double x, double y) {
++            return (q.x() - p.x()) * (y - p.y()) - (q.y() - p.y()) * (x - p.x());
++        };
++        const auto owns = [](const QPointF &p, const QPointF &q) {
++            const double dy = q.y() - p.y();
++            const double dx = q.x() - p.x();
++            return dy < 0 || (dy == 0 && dx > 0);
++        };
++        const bool o0 = owns(b, c), o1 = owns(c, a), o2 = owns(a, b);
++        std::array<float, N> attrs;
++        for (int y = y0; y <= y1; ++y) {
++            const double sy = y + 0.5;
++            for (int x = x0; x <= x1; ++x) {
++                const double sx = x + 0.5;
++                const double w0 = edge(b, c, sx, sy); // вес вершины a
++                const double w1 = edge(c, a, sx, sy); // вес b
++                const double w2 = edge(a, b, sx, sy); // вес c
++                if (w0 < 0 || w1 < 0 || w2 < 0)
++                    continue;
++                if ((w0 == 0 && !o0) || (w1 == 0 && !o1) || (w2 == 0 && !o2))
++                    continue;
++                const double l0 = w0 / area, l1 = w1 / area, l2 = w2 / area;
++                for (int i = 0; i < N; ++i)
++                    attrs[size_t(i)] = float(l0 * va->a[size_t(i)] + l1 * vb->a[size_t(i)]
++                                             + l2 * vc->a[size_t(i)]);
++                frag(x, y, attrs);
++            }
++        }
++    }
++
++    template<int N, class F>
++    void strip(const std::vector<AttrVertex<N>> &v, F &&frag) const
++    {
++        for (size_t i = 0; i + 2 < v.size(); ++i)
++            triangle(v[i], v[i + 1], v[i + 2], frag);
++    }
++
++    int width() const { return m_width; }
++    int height() const { return m_height; }
++
++private:
++    int m_width;
++    int m_height;
++};
++
++class AlphaBuffer
++{
++public:
++    AlphaBuffer(int width, int height)
++        : m_width(width), m_height(height), m_a(size_t(width) * size_t(height), 0.0f)
++    {
++    }
++
++    void over(int x, int y, float alpha)
++    {
++        float &d = m_a[size_t(y) * size_t(m_width) + size_t(x)];
++        d = d + alpha * (1.0f - d);
++    }
++    void max(int x, int y, float alpha)
++    {
++        float &d = m_a[size_t(y) * size_t(m_width) + size_t(x)];
++        d = std::max(d, alpha);
++    }
++    float at(int x, int y) const { return m_a[size_t(y) * size_t(m_width) + size_t(x)]; }
++
++    // pixel = pixel + (ink - pixel) * A * ink.alpha - без гаммы, как GPU в
++    // не-sRGB буфере окна.
++    void compositeOnto(QImage &image, const QColor &ink) const
++    {
++        const double inkAlpha = ink.alphaF();
++        const int w = std::min(m_width, image.width());
++        const int h = std::min(m_height, image.height());
++        for (int y = 0; y < h; ++y) {
++            QRgb *line = reinterpret_cast<QRgb *>(image.scanLine(y));
++            for (int x = 0; x < w; ++x) {
++                const double c = double(m_a[size_t(y) * size_t(m_width) + size_t(x)]) * inkAlpha;
++                if (c <= 0)
++                    continue;
++                const QRgb bg = line[x];
++                const auto mix = [c](int b, int i) { return int(std::lround(b + (i - b) * c)); };
++                line[x] = qRgb(mix(qRed(bg), ink.red()), mix(qGreen(bg), ink.green()),
++                               mix(qBlue(bg), ink.blue()));
++            }
++        }
++    }
++
++private:
++    int m_width;
++    int m_height;
++    std::vector<float> m_a;
++};
++
++// MSAA с подсчётом покрытий в каждой точке выборки (до 255).
++class SampleCountBuffer
++{
++public:
++    SampleCountBuffer(int width, int height, SamplePattern pattern);
++
++    void addTriangle(const QPointF &a, const QPointF &b, const QPointF &c);
++    void addTriangleStrip(const std::vector<QPointF> &strip);
++    void addTriangles(const std::vector<QPointF> &triangles);
++
++    // Resolve: среднее по точкам выборки от 1 - (1 - alpha)^count, без гаммы.
++    void compositeOnto(QImage &image, const QColor &ink) const;
++
++private:
++    int m_width;
++    int m_height;
++    SamplePattern m_pattern;
++    int m_count;
++    std::vector<uint8_t> m_counts;
++};
++
++} // namespace lab
+diff --git a/tools/stroke-lab/corpus.cpp b/tools/stroke-lab/corpus.cpp
+index b32cc0a..6061258 100644
+--- a/tools/stroke-lab/corpus.cpp
++++ b/tools/stroke-lab/corpus.cpp
+@@ -288,12 +288,22 @@ void sampleEvents(SampleStroke &stroke, const Motion &motion, const CorpusOption
+     const double period = 1.0 / options.rateHz;
+     const double phase = rng.uniform(0.0, period);
+     const auto quant = [](double v, double q) { return std::round(v / q) * q; };
++    std::vector<QPointF> history;
+     for (int k = 0;; ++k) {
+         const double t = path.t.front() + phase * (k > 0 ? 1.0 : 0.0) + k * period;
+         if (t > path.t.back())
+             break;
+         QPointF pos = truthAt(path, t) + tremor.at(t)
+             + QPointF(rng.gauss(), rng.gauss()) * options.noiseSigma;
++        if (options.libinputSmoothing) {
++            history.push_back(pos);
++            if (history.size() > 4)
++                history.erase(history.begin());
++            QPointF sum;
++            for (const QPointF &h : history)
++                sum += h;
++            pos = sum / double(history.size());
++        }
+         pos = QPointF(quant(pos.x(), options.positionQuantum), quant(pos.y(), options.positionQuantum));
+         double pressure = pressureAt(path, t) + rng.gauss() * options.pressureNoise;
+         pressure = std::clamp(quant(pressure, 1.0 / 4096.0), 0.0, 1.0);
+@@ -697,6 +707,22 @@ std::vector<Sample> buildCorpus(const CorpusOptions &options)
+     specs.push_back({"small_e_10", "«e» 10 px, 180 px/s", {"small"}, 10,
+                      text(U"E", 10, false), motion(180, 5, 0.15, 25)});
+ 
++    {
++        // Точки-тапы: перо касается и почти не движется (0.15…3 px), каждая -
++        // отдельный штрих. Точка над i, пунктуация, точка в «ё».
++        std::vector<Shape> dots;
++        const double lengths[] = {0.15, 0.4, 0.8, 1.5, 3.0};
++        double x = 0.0;
++        for (double length : lengths) {
++            Shape s;
++            s.parts.push_back({QPointF(x, 0.0), QPointF(x + length * 0.8, length * 0.6)});
++            dots.push_back(s);
++            x += 14.0;
++        }
++        specs.push_back({"dots_tap", "Тапы-точки 0.15…3 px, 15 px/s", {"tap"}, 8, dots,
++                         motion(15, 8, 0.12, 26)});
++    }
++
+     specs.push_back({"corner_N", "Печатная N 24 px, 300 px/s", {"corner"}, 24,
+                      text(U"N", 24, false), motion(300, 12, 0.12, 31)});
+     specs.push_back({"corner_M", "Печатная M 20 px, 300 px/s", {"corner", "small"}, 20,
+@@ -743,6 +769,22 @@ std::vector<Sample> buildCorpus(const CorpusOptions &options)
+     specs.push_back({"slow_hello", "«hello» x-height 18, 70 px/s, тремор 0.3 px", {"slow", "word"},
+                      18, text(U"hello", 18, true), motion(70, 9, 0.3, 53)});
+ 
++    {
++        // Точки и короткие касания (точка над i, «:», «;»): сдвиг пера за
++        // касание 0.3…3 px. Касание совсем без сдвига корпус не умеет (эталону
++        // нужно 2 точки) - его проверяет tools/stroke-lab/variants/google_ink.cpp.
++        std::vector<Shape> taps;
++        const double lengths[] = {0.3, 0.6, 1.0, 1.5, 2.2, 3.0};
++        for (int i = 0; i < 6; ++i) {
++            Shape s;
++            const QPointF a(i * 12.0, (i % 2) * 6.0);
++            s.parts.push_back({a, a + QPointF(lengths[i] * 0.6, lengths[i] * 0.8)});
++            taps.push_back(s);
++        }
++        specs.push_back({"dots_taps", "Точки-касания со сдвигом 0.3…3 px", {"dots"}, 8, taps,
++                         motion(60, 4, 0.12, 61)});
++    }
++
+     std::vector<Sample> samples;
+     for (const Spec &spec : specs)
+         samples.push_back(realize(spec, spec.motion.seed, options));
+diff --git a/tools/stroke-lab/corpus.h b/tools/stroke-lab/corpus.h
+index 821b1e6..08e9f5b 100644
+--- a/tools/stroke-lab/corpus.h
++++ b/tools/stroke-lab/corpus.h
+@@ -55,6 +55,10 @@ struct CorpusOptions
+     double positionQuantum = 1.0 / 256.0; // wl_fixed
+     double noiseSigma = 0.05;             // шум датчика, px
+     double pressureNoise = 0.004;
++    // Эмуляция сглаживания libinput (evdev-tablet.c, tablet_smoothen_axes):
++    // положение - среднее последних 4 отсчётов. Для пера WCOM0174 (VID
++    // 0x2D1F) оно, по разбору критика, включено.
++    bool libinputSmoothing = false;
+ };
+ 
+ std::vector<Sample> buildCorpus(const CorpusOptions &options = {});
+diff --git a/tools/stroke-lab/endcheck.cpp b/tools/stroke-lab/endcheck.cpp
+new file mode 100644
+index 0000000..89bb80d
+--- /dev/null
++++ b/tools/stroke-lab/endcheck.cpp
+@@ -0,0 +1,269 @@
++// --endcheck: синтетика для концов штриха (apps-survey, эксперимент 1).
++//
++// Прямая по оси x на 100 / 300 / 600 экранных px/s, 481 Гц, метки кратны
++// 1 мс, без шума. Давление: нарастание 0.05 -> 0.6 за 15 мс (smoothstep),
++// плато, спад до 0 за 12 мс перед отрывом - профиль из плана критика. Плюс
++// касание со сдвигом 0.3 px за 30 мс.
++//
++// Для каждого варианта:
++//  entry_px  - длина дуги от начала, пока толщина не дойдёт до 90% плато;
++//  exit_px   - то же от конца;
++//  entry_ref / exit_ref - то же для эталона: закон 0.25 + 0.75 p на
++//              настоящем давлении (без фильтра);
++//  step_end  - наибольший относительный скачок толщины между соседними
++//              точками осевой на последних 3 толщинах плато;
++//  cap_dev   - отклонение вершин геометрии за концом штриха от окружности
++//              радиуса полутолщины, в долях радиуса (0 - полудиск);
++//  tap_aspect - отношение сторон охвата геометрии касания (1 - диск).
++
++#include "endcheck.h"
++
++#include <QRectF>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++
++namespace lab {
++
++namespace {
++
++double sstep(double x)
++{
++    x = std::clamp(x, 0.0, 1.0);
++    return x * x * (3.0 - 2.0 * x);
++}
++
++struct Synthetic
++{
++    std::vector<InkPoint> events;
++    double duration = 0.0;
++};
++
++double pressureProfile(double t, double duration)
++{
++    const double rin = sstep(t / 0.015);
++    const double rout = sstep((duration - t) / 0.012);
++    return 0.05 + (0.6 - 0.05) * rin * rout - 0.05 * (1.0 - rout);
++}
++
++Synthetic line(double speed, double length)
++{
++    Synthetic s;
++    s.duration = length / speed;
++    const double period = 1.0 / 481.0;
++    for (int k = 0;; ++k) {
++        const double t = k * period;
++        if (t > s.duration)
++            break;
++        const double stamp = std::floor((1.0 + t) / 0.001 + 1e-9) * 0.001;
++        s.events.push_back({QPointF(10.0 + speed * t, 20.0), std::clamp(pressureProfile(t, s.duration), 0.0, 1.0), stamp});
++    }
++    return s;
++}
++
++Synthetic tap()
++{
++    Synthetic s;
++    s.duration = 0.03;
++    const double period = 1.0 / 481.0;
++    for (int k = 0;; ++k) {
++        const double t = k * period;
++        if (t > s.duration)
++            break;
++        const double stamp = std::floor((1.0 + t) / 0.001 + 1e-9) * 0.001;
++        s.events.push_back({QPointF(10.0 + 0.3 * t / s.duration, 20.0), 0.5, stamp});
++    }
++    return s;
++}
++
++double arcUntil(const std::vector<CenterPoint> &c, double threshold, bool fromEnd)
++{
++    double arc = 0.0;
++    const int n = int(c.size());
++    for (int k = 0; k < n; ++k) {
++        const int i = fromEnd ? n - 1 - k : k;
++        if (c[size_t(i)].width >= threshold)
++            return arc;
++        const int j = fromEnd ? i - 1 : i + 1;
++        if (j < 0 || j >= n)
++            break;
++        arc += std::hypot(c[size_t(j)].pos.x() - c[size_t(i)].pos.x(), c[size_t(j)].pos.y() - c[size_t(i)].pos.y());
++    }
++    return arc;
++}
++
++} // namespace
++
++int runEndCheck(const std::vector<const VariantInfo *> &variants, double width)
++{
++    std::printf("\n## endcheck: концы штриха на синтетике (ширина %.2f pt, масштаб 1)\n\n", width);
++    std::printf("| variant | v px/s | entry px | entry ref | exit px | exit ref | entry/exit | step_end | cap_dev |\n");
++    std::printf("|---|---|---|---|---|---|---|---|---|\n");
++    for (const VariantInfo *info : variants) {
++        for (double speed : {100.0, 300.0, 600.0}) {
++            const Synthetic s = line(speed, std::max(60.0, speed * 0.2));
++            std::unique_ptr<Variant> v = info->factory();
++            StrokeSetup setup;
++            setup.scale = 1.0;
++            setup.width = width;
++            v->begin(setup);
++            for (const InkPoint &e : s.events)
++                v->addEvent(e);
++            v->finish();
++            const std::vector<CenterPoint> c = v->centerline();
++            if (c.size() < 3)
++                continue;
++            const double plateau = c[c.size() / 2].width;
++            const double entry = arcUntil(c, 0.9 * plateau, false);
++            const double exitLen = arcUntil(c, 0.9 * plateau, true);
++            // Эталон: закон приложения на настоящем давлении.
++            std::vector<CenterPoint> ref;
++            for (const InkPoint &e : s.events)
++                ref.push_back({e.position, width * (0.25 + 0.75 * e.pressure), e.pressure, e.timeSeconds});
++            const double refPlateau = ref[ref.size() / 2].width;
++            const double entryRef = arcUntil(ref, 0.9 * refPlateau, false);
++            const double exitRef = arcUntil(ref, 0.9 * refPlateau, true);
++            // Скачок толщины на последних 3 толщинах.
++            double step = 0.0, arc = 0.0;
++            for (size_t i = c.size() - 1; i > 0 && arc < 3.0 * plateau; --i) {
++                const double w0 = c[i - 1].width, w1 = c[i].width;
++                step = std::max(step, std::abs(w1 - w0) / std::max(w0, 1e-9));
++                arc += std::hypot(c[i].pos.x() - c[i - 1].pos.x(), c[i].pos.y() - c[i - 1].pos.y());
++            }
++            // Торец: вершины геометрии за концом осевой.
++            const Geometry g = v->geometry();
++            const QPointF end = c.back().pos;
++            const double r = c.back().width / 2.0;
++            double capDev = 0.0;
++            int beyond = 0;
++            std::vector<QPointF> verts = g.vertices;
++            for (const QPolygonF &poly : g.polygons)
++                verts.insert(verts.end(), poly.begin(), poly.end());
++            for (const QPointF &p : verts) {
++                if (p.x() <= end.x() + 1e-6)
++                    continue;
++                ++beyond;
++                capDev = std::max(capDev, std::abs(std::hypot(p.x() - end.x(), p.y() - end.y()) - r) / r);
++            }
++            if (beyond == 0)
++                capDev = 1.0; // плоский торец: ничего за концом
++            std::printf("| %s | %.0f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f |\n", info->name.c_str(),
++                        speed, entry, entryRef, exitLen, exitRef, exitLen > 0 ? entry / exitLen : 0.0, step,
++                        capDev);
++        }
++    }
++    std::printf("\n| variant | tap: points | tap bbox w x h, pt | aspect |\n|---|---|---|---|\n");
++    for (const VariantInfo *info : variants) {
++        const Synthetic s = tap();
++        std::unique_ptr<Variant> v = info->factory();
++        StrokeSetup setup;
++        setup.width = width;
++        v->begin(setup);
++        for (const InkPoint &e : s.events)
++            v->addEvent(e);
++        v->finish();
++        const Geometry g = v->geometry();
++        QRectF box;
++        bool first = true;
++        std::vector<QPointF> verts = g.vertices;
++        for (const QPolygonF &poly : g.polygons)
++            verts.insert(verts.end(), poly.begin(), poly.end());
++        for (const QPointF &p : verts) {
++            if (first)
++                box = QRectF(p, QSizeF(0, 0));
++            box = box.united(QRectF(p, QSizeF(1e-9, 1e-9)));
++            first = false;
++        }
++        std::printf("| %s | %zu | %.2f x %.2f | %.2f |\n", info->name.c_str(), v->centerline().size(),
++                    box.width(), box.height(), box.height() > 0 ? box.width() / box.height() : 0.0);
++    }
++
++    // Траектория (эксперимент 2): окружность r = 20 px на 50/100/150 px/s,
++    // 481 Гц, метки 1 мс, КОРРЕЛИРОВАННЫЙ шум AR(1) rho = 0.6, sigma = 0.3 px
++    // по оси. residual - СКО радиального отклонения осевой от настоящей
++    // окружности; rough - СКО второй разности угла касательной на нарезке
++    // 1 px (град). Без 15 px у концов. Среднее по 5 зёрнам.
++    std::printf("\n| variant | v px/s | residual px | rough deg | radius bias px |\n|---|---|---|---|---|\n");
++    for (const VariantInfo *info : variants) {
++        for (double speed : {50.0, 100.0, 150.0}) {
++            double resSum = 0, roughSum = 0, biasSum = 0;
++            const int seeds = 5;
++            for (int seed = 1; seed <= seeds; ++seed) {
++                uint64_t state = 0x9E3779B97F4A7C15ULL * uint64_t(seed);
++                const auto gauss = [&state] {
++                    auto next = [&state] {
++                        state ^= state << 13;
++                        state ^= state >> 7;
++                        state ^= state << 17;
++                        return double(state >> 11) / double(1ULL << 53);
++                    };
++                    const double u1 = std::max(next(), 1e-12), u2 = next();
++                    return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
++                };
++                const double r = 20.0, rho = 0.6, sigma = 0.3;
++                const QPointF c(40.0, 40.0);
++                const double duration = 1.6 * M_PI * r / speed; // 0.8 оборота
++                std::unique_ptr<Variant> v = info->factory();
++                StrokeSetup setup;
++                setup.width = width;
++                v->begin(setup);
++                double nx = 0, ny = 0;
++                for (int k = 0;; ++k) {
++                    const double t = k / 481.0;
++                    if (t > duration)
++                        break;
++                    nx = rho * nx + std::sqrt(1 - rho * rho) * sigma * gauss();
++                    ny = rho * ny + std::sqrt(1 - rho * rho) * sigma * gauss();
++                    const double a = speed * t / r;
++                    const double stamp = std::floor((1.0 + t) / 0.001 + 1e-9) * 0.001;
++                    v->addEvent({c + QPointF(r * std::cos(a) + nx, r * std::sin(a) + ny), 0.5, stamp});
++                }
++                v->finish();
++                const std::vector<CenterPoint> cl = v->centerline();
++                // Нарезка 1 px.
++                std::vector<QPointF> u;
++                u.push_back(cl.front().pos);
++                double carry = 0;
++                for (size_t i = 1; i < cl.size(); ++i) {
++                    QPointF a = cl[i - 1].pos;
++                    const QPointF b = cl[i].pos;
++                    double seg = std::hypot(b.x() - a.x(), b.y() - a.y());
++                    while (carry + seg >= 1.0) {
++                        const double need = 1.0 - carry;
++                        a = a + (b - a) * (need / seg);
++                        seg -= need;
++                        carry = 0;
++                        u.push_back(a);
++                    }
++                    carry += seg;
++                }
++                double res = 0, bias = 0, rough = 0;
++                int nres = 0, nrough = 0;
++                std::vector<double> th;
++                for (size_t i = 0; i + 1 < u.size(); ++i)
++                    th.push_back(std::atan2(u[i + 1].y() - u[i].y(), u[i + 1].x() - u[i].x()));
++                for (size_t i = 15; i + 15 < u.size(); ++i) {
++                    const double d = std::hypot(u[i].x() - c.x(), u[i].y() - c.y()) - r;
++                    res += d * d;
++                    bias += d;
++                    ++nres;
++                }
++                for (size_t i = 16; i + 16 < th.size(); ++i) {
++                    auto wrap = [](double x) { return std::remainder(x, 2 * M_PI); };
++                    const double d2 = wrap(th[i + 1] - th[i]) - wrap(th[i] - th[i - 1]);
++                    rough += d2 * d2;
++                    ++nrough;
++                }
++                resSum += std::sqrt(res / std::max(nres, 1));
++                biasSum += bias / std::max(nres, 1);
++                roughSum += std::sqrt(rough / std::max(nrough, 1)) * 180.0 / M_PI;
++            }
++            std::printf("| %s | %.0f | %.3f | %.2f | %.3f |\n", info->name.c_str(), speed, resSum / seeds,
++                        roughSum / seeds, biasSum / seeds);
++        }
++    }
++    return 0;
++}
++
++} // namespace lab
+diff --git a/tools/stroke-lab/endcheck.h b/tools/stroke-lab/endcheck.h
+new file mode 100644
+index 0000000..92b1cbb
+--- /dev/null
++++ b/tools/stroke-lab/endcheck.h
+@@ -0,0 +1,10 @@
++#pragma once
++
++#include <vector>
++
++#include "lab.h"
++
++namespace lab {
++// Синтетика касания и отрыва для сравнения концов штриха; печатает таблицы.
++int runEndCheck(const std::vector<const VariantInfo *> &variants, double width);
++} // namespace lab
+diff --git a/tools/stroke-lab/main.cpp b/tools/stroke-lab/main.cpp
+index 1502411..c7c56e7 100644
+--- a/tools/stroke-lab/main.cpp
++++ b/tools/stroke-lab/main.cpp
+@@ -18,8 +18,10 @@
+ #include <map>
+ 
+ #include "corpus.h"
++#include "endcheck.h"
+ #include "lab.h"
+ #include "metrics.h"
++#include "rastermetrics.h"
+ #include "render.h"
+ 
+ namespace lab {
+@@ -85,6 +87,11 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
+             int mutations = 0;
+             const int snapshotEvent =
+                 si == snapshotStroke ? int(std::floor(n * 0.6)) : -1;
++            // Лента кадров: ещё три момента того же штриха.
++            std::vector<int> filmEvents;
++            if (si == snapshotStroke)
++                for (double f : {0.6, 0.3, 0.45, 0.75})
++                    filmEvents.push_back(int(std::floor(n * f)));
+             if (last)
+                 run.events.assign(n, EventRecord());
+ 
+@@ -111,7 +118,10 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
+                     const size_t idx = size_t(from) + j;
+                     if (idx < seen.size()) {
+                         const QPointF d = seen[idx].pos - ws.settledFrom[j].pos;
+-                        if (std::hypot(d.x(), d.y()) > 1e-9)
++                        // Толщина окончательной точки тоже не имеет права
++                        // меняться (apps-survey: давление по окну).
++                        if (std::hypot(d.x(), d.y()) > 1e-9
++                            || std::abs(seen[idx].width - ws.settledFrom[j].width) > 1e-9)
+                             ++mutations;
+                     } else {
+                         seen.push_back(ws.settledFrom[j]);
+@@ -129,10 +139,17 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
+                 for (const CenterPoint &c : ws.provisional)
+                     record.provisional.push_back(c.pos * scale);
+                 record.wetDirtyVertices = ws.vertexCount - ws.settledVertexCount;
++                record.settledCount = ws.settledCount;
+                 if (int(k) == snapshotEvent) {
+                     run.wetSnapshotEvent = snapshotEvent;
+                     run.wetGeometry = variant->wetGeometry();
+                 }
++                for (int fe : filmEvents) {
++                    if (int(k) == fe) {
++                        run.wetFilmEvents.push_back(fe);
++                        run.wetFilmGeometry.push_back(variant->wetGeometry());
++                    }
++                }
+             }
+             const auto f0 = std::chrono::steady_clock::now();
+             variant->finish();
+@@ -145,7 +162,8 @@ std::vector<StrokeRun> runVariant(const VariantInfo &info, const Sample &sample,
+                 run.finalVertices = run.geometry.vertexCount();
+                 for (size_t j = 0; j < seen.size() && j < run.centerline.size(); ++j) {
+                     const QPointF d = seen[j].pos - run.centerline[j].pos;
+-                    if (std::hypot(d.x(), d.y()) > 1e-9)
++                    if (std::hypot(d.x(), d.y()) > 1e-9
++                        || std::abs(seen[j].width - run.centerline[j].width) > 1e-9)
+                         ++mutations;
+                 }
+                 if (seen.size() > run.centerline.size())
+@@ -203,17 +221,97 @@ const Column kColumns[] = {
+     {"shape_hausdorff_pct", Column::Mean, "small H%"},
+     {"closed_area_ratio", Column::Mean, "o area"},
+     {"width_hf_rms_px", Column::Mean, "w hf"},
++    {"width_mean_ratio", Column::Mean, "w ratio"},
++    {"width_track_rms_rel", Column::Mean, "w track"},
++    {"width_end_ratio", Column::Mean, "w end"},
++    {"width_rise_px", Column::Mean, "w rise px"},
++    {"width_start_err_px", Column::Mean, "w start err"},
++    {"width_end_err_px", Column::Mean, "w end err"},
++    {"width_body_err_px", Column::Mean, "w body err"},
++    {"width_step_max_px", Column::Max, "w step max"},
++    {"width_body_cv", Column::Mean, "w body cv"},
+     {"wet_lag_px_mean", Column::Mean, "lag px"},
+     {"wet_lag_px_p95", Column::Mean, "lag p95"},
+     {"wet_lag_truth_px_mean", Column::Mean, "lag gt px"},
+     {"wet_lag_ms_mean", Column::Mean, "lag ms"},
+     {"wet_vs_final_mean_px", Column::Mean, "wet≠final"},
++    {"frame_gap_px_med_L22", Column::Mean, "gap22 med"},
++    {"frame_gap_fast_px_med_L22", Column::Mean, "gap22 fast"},
++    {"frame_gap_ms_med_L22", Column::Mean, "gap22 ms"},
++    {"frame_ahead_px_p99_L22", Column::Mean, "ahead p99"},
++    {"frame_ahead_px_max_L22", Column::Max, "ahead max"},
++    {"frame_offpath_px_p99", Column::Mean, "offpath p99"},
++    {"frame_offpath_px_max", Column::Max, "offpath max"},
++    {"frame_retract_px_p99", Column::Mean, "retract p99"},
++    {"frame_heading_err_deg_p95", Column::Mean, "head° p95"},
++    {"frame_wag_deg_p95", Column::Mean, "wag° p95"},
++    {"frame_tail_vs_final_px_p95", Column::Mean, "tail≠fin p95"},
++    {"frame_lift_ahead_px_max", Column::Max, "lift max"},
+     {"settled_mutations", Column::Sum, "mut"},
+     {"cpu_us_per_event_mean", Column::Mean, "µs/ev"},
+     {"cpu_us_per_event_p99", Column::Max, "µs p99"},
+     {"final_vertices", Column::Sum, "verts"},
++    {"raster_vs_ideal_rms", Column::Mean, "rast rms"},
++    {"raster_vs_ideal_p99", Column::Mean, "rast p99"},
++    {"raster_vs_ideal_ink_ratio", Column::Mean, "ink/ideal"},
++    {"raster_vs_truth_rms", Column::Mean, "rast-truth rms"},
++    {"raster_vs_truth_ink_ratio", Column::Mean, "ink/truth"},
++    {"width_cv", Column::Mean, "w cv"},
++    {"width_p5_physpx", Column::Mean, "w p5 px"},
++    // Растеризация (rastermetrics.h): ошибка покрытия ×255.
++    {"aa_rmse_shape", Column::Mean, "AA rmse"},
++    {"aa_p99_shape", Column::Mean, "AA p99"},
++    {"aa_rmse_ideal", Column::Mean, "AA vs ideal"},
++    {"aa_rmse_truth", Column::Mean, "px vs truth"},
++    {"aa_flicker", Column::Mean, "flicker"},
++    {"aa_mass_breath_pct", Column::Mean, "mass breath%"},
++    {"aa_mass_ratio", Column::Mean, "mass/ideal"},
++    {"aa_mass_cv", Column::Mean, "mass CV"},
++    {"marker_dark_frac", Column::Mean, "marker dark"},
+ };
+ 
++// Покрытие пикселя по красному каналу: бумага 255, чернила 0x1c - самый
++// большой размах каналов.
++double inkCoverage(QRgb pixel, const QColor &paper, const QColor &ink)
++{
++    return std::clamp(double(paper.red() - qRed(pixel)) / double(paper.red() - ink.red()), 0.0, 1.0);
++}
++
++// Растровые метрики: картинка «как в приложении» против эталонной картинки
++// (ideal raster той же осевой - вклад тесселяции и растеризации; truth - всё
++// вместе). rms/p99 - по пикселям, где хоть одна картинка покрыта больше 1/64;
++// ink_ratio - масса чернил Σcov / Σcov эталона (плоские торцы < 1, двойное
++// смешивание > 1).
++void rasterMetrics(const QImage &app, const QImage &reference, const QColor &paper,
++                   const QColor &ink, const QString &prefix, QJsonObject &m)
++{
++    if (app.isNull() || reference.isNull() || app.size() != reference.size())
++        return;
++    std::vector<double> errors;
++    double sumApp = 0.0, sumRef = 0.0, sq = 0.0;
++    for (int y = 0; y < app.height(); ++y) {
++        const QRgb *a = reinterpret_cast<const QRgb *>(app.constScanLine(y));
++        const QRgb *r = reinterpret_cast<const QRgb *>(reference.constScanLine(y));
++        for (int x = 0; x < app.width(); ++x) {
++            const double ca = inkCoverage(a[x], paper, ink);
++            const double cr = inkCoverage(r[x], paper, ink);
++            sumApp += ca;
++            sumRef += cr;
++            if (ca < 1.0 / 64 && cr < 1.0 / 64)
++                continue;
++            const double e = ca - cr;
++            sq += e * e;
++            errors.push_back(std::abs(e));
++        }
++    }
++    if (errors.empty())
++        return;
++    std::sort(errors.begin(), errors.end());
++    m[prefix + QStringLiteral("_rms")] = std::sqrt(sq / errors.size());
++    m[prefix + QStringLiteral("_p99")] = errors[size_t(0.99 * (errors.size() - 1))];
++    m[prefix + QStringLiteral("_ink_ratio")] = sumRef > 0 ? sumApp / sumRef : 0.0;
++}
++
+ } // namespace
+ 
+ int main(int argc, char **argv)
+@@ -246,13 +344,35 @@ int main(int argc, char **argv)
+     QCommandLineOption repsOpt(QStringLiteral("reps"),
+                                QStringLiteral("Повторов для замера CPU (берётся минимум)"),
+                                QStringLiteral("n"), QStringLiteral("3"));
++    QCommandLineOption minWidthOpt(QStringLiteral("min-width-factor"),
++                                   QStringLiteral("Нижний предел эталонного закона толщины w·(f + (1−f)·p)"),
++                                   QStringLiteral("f"), QStringLiteral("0.25"));
++    QCommandLineOption noiseOpt(QStringLiteral("noise"),
++                                QStringLiteral("Шум датчика σ, px (по умолчанию 0.05)"),
++                                QStringLiteral("px"), QStringLiteral("0.05"));
++    QCommandLineOption rateOpt(QStringLiteral("rate"), QStringLiteral("Частота пера, Гц (481)"),
++                               QStringLiteral("hz"), QStringLiteral("481"));
++    QCommandLineOption libinputOpt(QStringLiteral("libinput-smoothing"),
++                                   QStringLiteral("Эмулировать среднее 4 отсчётов libinput"));
+     QCommandLineOption noPngOpt(QStringLiteral("no-png"), QStringLiteral("Только метрики"));
+     QCommandLineOption listOpt(QStringLiteral("list"), QStringLiteral("Список вариантов и сэмплов"));
++    QCommandLineOption endOpt(QStringLiteral("endcheck"),
++                              QStringLiteral("Синтетика концов штриха (касание, отрыв, тап) и выход"));
++    QCommandLineOption noRasterOpt(QStringLiteral("no-raster"),
++                                   QStringLiteral("Без метрик растеризации (rastermetrics.h)"));
++    QCommandLineOption shiftsOpt(QStringLiteral("shifts"),
++                                 QStringLiteral("Субпиксельных сдвигов для aa_flicker"),
++                                 QStringLiteral("n"), QStringLiteral("8"));
+     parser.addOptions({variantsOpt, outOpt, samplesOpt, scalesOpt, widthOpt, dprOpt, repsOpt,
+-                       noPngOpt, listOpt});
++                       minWidthOpt, noiseOpt, rateOpt, libinputOpt, noPngOpt, listOpt, endOpt,
++                       noRasterOpt, shiftsOpt});
+     parser.process(app);
+ 
+-    const std::vector<Sample> corpus = buildCorpus();
++    CorpusOptions corpusOptions;
++    corpusOptions.noiseSigma = parser.value(noiseOpt).toDouble();
++    corpusOptions.rateHz = parser.value(rateOpt).toDouble();
++    corpusOptions.libinputSmoothing = parser.isSet(libinputOpt);
++    const std::vector<Sample> corpus = buildCorpus(corpusOptions);
+     auto &variants = registry();
+     std::sort(variants.begin(), variants.end(),
+               [](const VariantInfo &a, const VariantInfo &b) {
+@@ -289,6 +409,9 @@ int main(int argc, char **argv)
+             return 2;
+         }
+     }
++    if (parser.isSet(endOpt))
++        return runEndCheck(chosen, parser.value(widthOpt).toDouble());
++
+     const QStringList samplePatterns = parser.value(samplesOpt).split(',', Qt::SkipEmptyParts);
+     std::vector<const Sample *> samples;
+     for (const Sample &s : corpus)
+@@ -306,6 +429,10 @@ int main(int argc, char **argv)
+     RenderOptions render;
+     render.dpr = parser.value(dprOpt).toDouble();
+     render.metrics.width = width;
++    render.metrics.minWidthFactor = parser.value(minWidthOpt).toDouble();
++    const bool raster = !parser.isSet(noRasterOpt);
++    RasterMetricsOptions rasterOptions;
++    rasterOptions.shifts = std::max(1, parser.value(shiftsOpt).toInt());
+ 
+     // results[variant][scale][sample] = metrics
+     std::map<std::string, std::map<double, std::map<std::string, QJsonObject>>> results;
+@@ -331,15 +458,59 @@ int main(int argc, char **argv)
+             for (const VariantInfo *v : chosen) {
+                 std::vector<StrokeRun> runs = runVariant(*v, *sample, scale, width, render.ink, reps);
+                 QJsonObject m = computeMetrics(*sample, runs, scale, render.metrics);
++                {
++                    // Ровность толщины: коэффициент вариации полной толщины по
++                    // точкам осевой (взвешено длиной) и 5-й перцентиль толщины в
++                    // физических px - насколько тонкой линия становится.
++                    double sw = 0, swx = 0, swxx = 0;
++                    std::vector<double> widths;
++                    for (const StrokeRun &run : runs) {
++                        for (size_t i = 1; i < run.centerline.size(); ++i) {
++                            const QPointF d = run.centerline[i].pos - run.centerline[i - 1].pos;
++                            const double l = std::hypot(d.x(), d.y());
++                            const double w = run.centerline[i].width * scale * render.dpr;
++                            sw += l;
++                            swx += l * w;
++                            swxx += l * w * w;
++                            widths.push_back(w);
++                        }
++                    }
++                    if (sw > 0 && !widths.empty()) {
++                        const double mean = swx / sw;
++                        m["width_cv"] = std::sqrt(std::max(0.0, swxx / sw - mean * mean)) / mean;
++                        std::sort(widths.begin(), widths.end());
++                        m["width_p5_physpx"] = widths[size_t(0.05 * (widths.size() - 1))];
++                        m["width_mean_physpx"] = mean;
++                    }
++                }
+                 m["sample"] = QString::fromStdString(sample->id);
+                 m["title"] = QString::fromStdString(sample->title);
+                 m["scale"] = scale;
++                QImage marker, errorMap;
++                if (raster) {
++                    RasterMetricsResult r =
++                        computeRasterMetrics(*sample, runs, scale, render, rasterOptions);
++                    for (auto it = r.metrics.begin(); it != r.metrics.end(); ++it)
++                        m[it.key()] = it.value();
++                    marker = r.marker;
++                    errorMap = r.errorMap;
++                }
+                 results[v->name][scale][sample->id] = m;
+                 if (!png)
+                     continue;
+                 const QString dir = out + '/' + QString::fromStdString(v->name);
++                if (!marker.isNull())
++                    save(marker, dir + QStringLiteral("/marker/") + tag + QStringLiteral(".png"));
++                if (!errorMap.isNull())
++                    save(upscale(errorMap, 4),
++                         dir + QStringLiteral("/aaerr/") + tag + QStringLiteral(".png"));
+                 const QImage appImage = renderApp(*sample, runs, scale, render);
+                 const QImage ideal = renderIdeal(*sample, runs, scale, render);
++                rasterMetrics(appImage, ideal, render.paper, render.ink,
++                              QStringLiteral("raster_vs_ideal"), m);
++                rasterMetrics(appImage, truth, render.paper, render.ink,
++                              QStringLiteral("raster_vs_truth"), m);
++                results[v->name][scale][sample->id] = m;
+                 save(appImage, dir + QStringLiteral("/png/") + tag + QStringLiteral(".png"));
+                 save(ideal, dir + QStringLiteral("/png/") + tag + QStringLiteral("_ideal.png"));
+                 save(renderWetFrame(*sample, runs, scale, render),
+diff --git a/tools/stroke-lab/metrics.cpp b/tools/stroke-lab/metrics.cpp
+index 86127e1..0f3e594 100644
+--- a/tools/stroke-lab/metrics.cpp
++++ b/tools/stroke-lab/metrics.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdio>
+ #include <limits>
+ #include <numeric>
+ #include <unordered_map>
+@@ -206,6 +207,289 @@ void curvatureTv(const std::vector<QPointF> &uniform, const std::vector<QPointF>
+     }
+ }
+ 
++// ---------------------------------------------------------------------------
++// Эмуляция кадров: что видит пишущий на экране.
++//
++// Кадр 120 Гц защёлкивает мокрое состояние в момент t_l: в него попадают
++// отсчёты, чьё настоящее время + kInputDelay <= t_l (доставка ввода до
++// клиента). Фотон выходит в t_l + (L - kInputDelay), то есть L - полная
++// задержка «перо -> фотон» для отсчёта, пришедшего ровно к защёлке. Фаза кадров
++// относительно штриха перебирается (kFramePhases равномерно по периоду).
++//
++// gap     - длина дуги эталона от проекции кончика до положения пера в момент
++//           фотона (то, что глаз видит как «линия не успевает»); < 0 - кончик
++//           впереди пера. Только кадры, где перо быстрее 50 px/s.
++// ahead   - max(0, -gap) по всем кадрам: кончик впереди настоящего пера.
++// lift    - то же для кадров, где перо уже оторвалось, а отрыв ещё не
++//           обработан: перо стоит в точке отрыва, так ловится «запятая».
++// offpath - самая дальняя точка провизорного хвоста от эталона в окне времени
++//           [t_k - 80 мс, t_k + 60 мс] (вылет мимо траектории, за петлю).
++// retract - насколько хвост кадра k не совпал с линией следующего другого
++//           кадра (его окончательные точки + хвост): «втягивание».
++// heading - угол между направлением кончика (последние 2 px мокрой линии) и
++//           касательной эталона в точке проекции кончика, градусы.
++// wag     - скачок heading между соседними разными кадрами: «виляние».
++// tailfinal - самая дальняя точка хвоста кадра от итоговой осевой.
++constexpr double kFramePeriod = 1.0 / 120.0;
++constexpr double kInputDelay = 0.002;
++constexpr int kFramePhases = 4;
++constexpr double kFrameLatencies[] = {0.016, 0.022, 0.028};
++constexpr int kLatencyCount = int(std::size(kFrameLatencies));
++constexpr int kMainLatency = 1; // L = 22 мс - для метрик, мало зависящих от L
++
++struct FrameAcc
++{
++    Stats gap[kLatencyCount], gapFast[kLatencyCount], gapMs[kLatencyCount],
++        ahead[kLatencyCount];
++    Stats offpath, retract, wag, heading, tailFinal, liftAhead;
++};
++
++// Эталон с шагом 0.25 px: точки, время, длина дуги.
++struct CoarseTruth
++{
++    std::vector<QPointF> p;
++    std::vector<double> t, s;
++
++    explicit CoarseTruth(const TruePath &truth)
++    {
++        for (size_t i = 0; i < truth.p.size(); ++i) {
++            const bool lastPoint = i + 1 == truth.p.size();
++            if (p.empty() || len(truth.p[i] - p.back()) >= 0.25
++                || (lastPoint && len(truth.p[i] - p.back()) > 1e-9)) {
++                s.push_back(p.empty() ? 0.0 : s.back() + len(truth.p[i] - p.back()));
++                p.push_back(truth.p[i]);
++                t.push_back(truth.t[i]);
++            }
++        }
++        if (p.size() == 1) {
++            p.push_back(p.back());
++            t.push_back(truth.t.back());
++            s.push_back(0.0);
++        }
++    }
++
++    size_t indexAt(double time) const
++    {
++        const auto it = std::lower_bound(t.begin(), t.end(), time);
++        return std::min(size_t(it - t.begin()), t.size() - 1);
++    }
++    double arcAt(double time) const
++    {
++        if (time <= t.front())
++            return 0.0;
++        if (time >= t.back())
++            return s.back();
++        const size_t j = indexAt(time);
++        const size_t i = j - 1;
++        const double u = (time - t[i]) / std::max(t[j] - t[i], 1e-12);
++        return s[i] + (s[j] - s[i]) * u;
++    }
++    // Ближайшая точка эталона в окне времени: расстояние, дуга, время.
++    double nearest(const QPointF &q, double tlo, double thi, double *arc = nullptr,
++                   double *time = nullptr) const
++    {
++        size_t a = indexAt(tlo);
++        a = a > 0 ? a - 1 : 0;
++        const size_t b = std::min(indexAt(thi) + 1, p.size() - 1);
++        double best = len(q - p[a]);
++        double bestS = s[a], bestT = t[a];
++        for (size_t i = a; i < b; ++i) {
++            const QPointF ab = p[i + 1] - p[i];
++            const double l2 = ab.x() * ab.x() + ab.y() * ab.y();
++            const double u = l2 < 1e-18 ? 0.0
++                : std::clamp(((q.x() - p[i].x()) * ab.x() + (q.y() - p[i].y()) * ab.y()) / l2, 0.0, 1.0);
++            const double d = len(q - (p[i] + ab * u));
++            if (d < best) {
++                best = d;
++                bestS = s[i] + (s[i + 1] - s[i]) * u;
++                bestT = t[i] + (t[i + 1] - t[i]) * u;
++            }
++        }
++        if (arc)
++            *arc = bestS;
++        if (time)
++            *time = bestT;
++        return best;
++    }
++    QPointF pointAtArc(double arc) const
++    {
++        if (arc <= 0.0)
++            return p.front();
++        if (arc >= s.back())
++            return p.back();
++        const size_t j = size_t(std::lower_bound(s.begin(), s.end(), arc) - s.begin());
++        const size_t i = j - 1;
++        const double u = (arc - s[i]) / std::max(s[j] - s[i], 1e-12);
++        return p[i] + (p[j] - p[i]) * u;
++    }
++    QPointF tangentAt(double time) const
++    {
++        const size_t j = indexAt(time);
++        const size_t i = j > 0 ? j - 1 : 0;
++        const size_t k = std::min(j + 1, p.size() - 1);
++        const QPointF d = p[k] - p[i];
++        const double l = len(d);
++        return l > 1e-9 ? d / l : QPointF(1, 0);
++    }
++};
++
++double distanceToPolyline(const QPointF &q, const std::vector<QPointF> &line)
++{
++    if (line.empty())
++        return std::numeric_limits<double>::infinity();
++    double best = len(q - line[0]);
++    for (size_t i = 0; i + 1 < line.size(); ++i) {
++        const QPointF ab = line[i + 1] - line[i];
++        const double l2 = ab.x() * ab.x() + ab.y() * ab.y();
++        const double u = l2 < 1e-18 ? 0.0
++            : std::clamp(((q.x() - line[i].x()) * ab.x() + (q.y() - line[i].y()) * ab.y()) / l2, 0.0, 1.0);
++        best = std::min(best, len(q - (line[i] + ab * u)));
++    }
++    return best;
++}
++
++// Мокрая линия кадра около кончика: окончательные точки с from и хвост.
++std::vector<QPointF> wetLine(const std::vector<QPointF> &center, const EventRecord &e, int from)
++{
++    std::vector<QPointF> line;
++    const int settled = std::min(e.settledCount, int(center.size()));
++    for (int i = std::max(0, from); i < settled; ++i)
++        line.push_back(center[size_t(i)]);
++    line.insert(line.end(), e.provisional.begin(), e.provisional.end());
++    if (line.empty())
++        line.push_back(e.tip);
++    return line;
++}
++
++// Направление кончика: от точки мокрой линии в 2 px позади до кончика.
++QPointF tipDirection(const std::vector<QPointF> &center, const EventRecord &e)
++{
++    const std::vector<QPointF> line = wetLine(center, e, e.settledCount - 40);
++    const QPointF tip = line.back();
++    double acc = 0;
++    for (size_t i = line.size() - 1; i > 0; --i) {
++        acc += len(line[i] - line[i - 1]);
++        if (acc >= 2.0) {
++            const QPointF d = tip - line[i - 1];
++            const double l = len(d);
++            return l > 1e-9 ? d / l : QPointF();
++        }
++    }
++    return QPointF();
++}
++
++void accumulateFrames(const SampleStroke &stroke, const StrokeRun &run,
++                      const std::vector<QPointF> &center, const PolylineIndex &centerIndex,
++                      FrameAcc &acc)
++{
++    const size_t n = std::min(run.events.size(), stroke.events.size());
++    if (n < 2 || stroke.truth.p.size() < 2)
++        return;
++    const CoarseTruth truth(stroke.truth);
++    const double tEnd = stroke.truth.t.back();
++
++    // Свойства мокрого состояния после отсчёта k - не зависят от кадров.
++    std::vector<double> offpath(n, -1.0), tailFinal(n, -1.0);
++    const auto stateOffpath = [&](size_t k) {
++        if (offpath[k] < 0) {
++            const double tk = stroke.eventTrueTime[k];
++            double worst = 0;
++            for (const QPointF &p : run.events[k].provisional)
++                worst = std::max(worst, truth.nearest(p, tk - 0.08, tk + 0.06));
++            offpath[k] = worst;
++        }
++        return offpath[k];
++    };
++    const auto stateTailFinal = [&](size_t k) {
++        if (tailFinal[k] < 0) {
++            double worst = 0;
++            for (const QPointF &p : run.events[k].provisional)
++                worst = std::max(worst, centerIndex.distance(p));
++            tailFinal[k] = worst;
++        }
++        return tailFinal[k];
++    };
++
++    for (int li = 0; li < kLatencyCount; ++li) {
++        const double L = kFrameLatencies[li];
++        for (int ph = 0; ph < kFramePhases; ++ph) {
++            const double t0 = stroke.eventTrueTime[0] + kInputDelay + kFramePeriod * ph / kFramePhases;
++            const double tLast = stroke.eventTrueTime[n - 1] + kInputDelay;
++            long prevK = -1;
++            bool prevValid = false;
++            double prevHeading = 0;
++            size_t k = 0;
++            for (double tl = t0; tl < tLast; tl += kFramePeriod) {
++                while (k + 1 < n && stroke.eventTrueTime[k + 1] + kInputDelay <= tl)
++                    ++k;
++                const EventRecord &e = run.events[k];
++                const double tk = stroke.eventTrueTime[k];
++                const double tph = tl + L - kInputDelay;
++                const double sPen = truth.arcAt(tph);
++                double sTip = 0, tTip = 0;
++                // Окно проекции узкое (±30 мс от отсчёта): на развороте путь
++                // идёт обратно по себе, и широкое окно цепляло бы чужой проход.
++                truth.nearest(e.tip, tk - 0.03, tk + 0.03, &sTip, &tTip);
++                const double gap = sPen - sTip;
++                acc.ahead[li].add(std::max(0.0, -gap));
++                if (tph >= tEnd) {
++                    // Перо уже оторвалось, а отрыв ещё не обработан.
++                    if (li == kMainLatency)
++                        acc.liftAhead.add(std::max(0.0, -gap));
++                    continue;
++                }
++                const size_t si = std::min(
++                    size_t(std::lower_bound(stroke.truth.t.begin(), stroke.truth.t.end(), tph)
++                           - stroke.truth.t.begin()),
++                    stroke.truth.t.size() - 1);
++                const double speed = stroke.truth.speed[si];
++                if (speed > 50.0) {
++                    acc.gap[li].add(gap);
++                    acc.gapMs[li].add((tph - tTip) * 1000.0);
++                    if (speed >= 150.0 && speed <= 600.0)
++                        acc.gapFast[li].add(gap);
++                }
++                if (li != kMainLatency)
++                    continue;
++
++                acc.offpath.add(stateOffpath(k));
++                acc.tailFinal.add(stateTailFinal(k));
++                const bool changed = prevK >= 0 && size_t(prevK) != k;
++                if (changed) {
++                    // Втягивание: хвост прошлого кадра против линии этого.
++                    const EventRecord &pe = run.events[size_t(prevK)];
++                    const std::vector<QPointF> line = wetLine(center, e, pe.settledCount - 4);
++                    double worst = 0;
++                    for (const QPointF &p : pe.provisional)
++                        worst = std::max(worst, distanceToPolyline(p, line));
++                    acc.retract.add(worst);
++                }
++                // Курс кончика против касательной эталона в точке проекции
++                // кончика; виляние - скачок этой ошибки между кадрами.
++                const QPointF dir = tipDirection(center, e);
++                // Хорда эталона на тех же 2 px до проекции кончика: на острие
++                // сравнивается излом с изломом, а не с касательной.
++                const QPointF td = truth.pointAtArc(sTip) - truth.pointAtArc(sTip - 2.0);
++                const double penSpeed = stroke.truth.speed[std::min(
++                    size_t(std::lower_bound(stroke.truth.t.begin(), stroke.truth.t.end(), tk)
++                           - stroke.truth.t.begin()),
++                    stroke.truth.t.size() - 1)];
++                const bool valid = !dir.isNull() && len(td) > 1.0 && penSpeed > 50.0;
++                const double heading = valid ? turnAngle(td, dir) : 0.0;
++                if (valid)
++                    acc.heading.add(std::abs(heading) * 180.0 / M_PI);
++                if (changed && valid && prevValid)
++                    acc.wag.add(std::abs(std::remainder(heading - prevHeading, 2 * M_PI)) * 180.0 / M_PI);
++                prevValid = valid;
++                prevHeading = heading;
++                prevK = long(k);
++            }
++        }
++    }
++}
++
++double median(const Stats &s) { return s.pct(0.5); }
++
+ } // namespace
+ 
+ double truthWidthPx(double pressure, double scale, const MetricsOptions &options)
+@@ -218,7 +502,14 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+                            const MetricsOptions &options)
+ {
+     Stats dev, cover, lagPx, lagTruePx, lagMs, wetFinal, cpu, dirty, corner, facet, turn,
+-        widthHf;
++        widthHf, widthErr, widthErrRel, widthTouch, widthLift, widthEndJump, widthEndJumpGt,
++        pressureLag, pressureErr;
++    // Профиль толщины у концов (apps-survey): ошибка толщины относительно
++    // эталона в той же точке эталона (проекция), отдельно в первых и последних
++    // kEndZone px дуги эталона и в теле; наибольший скачок толщины на 1 px
++    // дуги; коэффициент вариации толщины в теле.
++    Stats widthStartErr, widthEndErr, widthBodyErr, widthCv, widthCvGt;
++    double widthStepMax = 0.0, widthStepMaxGt = 0.0;
+     int facetCount = 0;
+     int mutations = 0;
+     int finalVertices = 0;
+@@ -228,7 +519,11 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+     double widthSum = 0, widthSumGt = 0;
+     int widthCount = 0, widthCountGt = 0;
+     double finishUs = 0;
++    // Профиль толщины у концов и слежение за эталонной толщиной.
++    Stats riseV, riseGt, fallV, fallGt, endRatioV, endRatioGt, startRatioV, startRatioGt, trackAbs,
++        trackRel;
+     double areaRatio = std::numeric_limits<double>::quiet_NaN();
++    FrameAcc frames;
+ 
+     // Острия (corners) - на весь сэмпл.
+     const std::vector<QPointF> &corners = sample.corners;
+@@ -292,6 +587,9 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+                     continue;
+                 const double f = std::abs(th[i] - (th[i - 1] + th[i + 1]) / 2.0) * 180.0 / M_PI;
+                 facet.add(f);
++                if (f > 60.0 && qEnvironmentVariableIsSet("STROKE_LAB_DEBUG_FACETS"))
++                    std::fprintf(stderr, "facet %s stroke %zu at (%.1f,%.1f): %.1f deg\n",
++                                 sample.id.c_str(), si, c[i].x(), c[i].y(), f);
+                 turn.add(std::abs(th[i]) * 180.0 / M_PI);
+                 if (f > 2.0)
+                     ++facetCount;
+@@ -331,6 +629,7 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+                 }
+             }
+             resample(cp, cw, 1.0, u, w);
++            const std::vector<double> wv = w;
+             for (size_t i = 1; i < w.size(); ++i) {
+                 widthTv += std::abs(w[i] - w[i - 1]);
+                 widthLen += 1.0;
+@@ -357,6 +656,206 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+                 widthSumGt += x;
+                 ++widthCountGt;
+             }
++            // Концы: длина дуги до 90% медианы толщины от начала и от конца,
++            // средняя толщина первых/последних 2 px к медиане. Слежение: RMS
++            // разности толщины варианта и эталона при сопоставлении по доле
++            // длины дуги.
++            const auto profile = [](const std::vector<double> &x, Stats &rise, Stats &fall,
++                                    Stats &startRatio, Stats &endRatio) {
++                if (x.size() < 10)
++                    return;
++                std::vector<double> s = x;
++                std::nth_element(s.begin(), s.begin() + long(s.size() / 2), s.end());
++                const double med = s[s.size() / 2];
++                if (med <= 0)
++                    return;
++                size_t i = 0;
++                while (i < x.size() && x[i] < 0.9 * med)
++                    ++i;
++                rise.add(double(i));
++                size_t j = 0;
++                while (j < x.size() && x[x.size() - 1 - j] < 0.9 * med)
++                    ++j;
++                fall.add(double(j));
++                startRatio.add((x[0] + x[1] + x[2]) / 3.0 / med);
++                endRatio.add((x[x.size() - 1] + x[x.size() - 2] + x[x.size() - 3]) / 3.0 / med);
++            };
++            profile(wv, riseV, fallV, startRatioV, endRatioV);
++            profile(w, riseGt, fallGt, startRatioGt, endRatioGt);
++            if (wv.size() >= 10 && w.size() >= 10) {
++                double sq = 0, mean = 0;
++                for (size_t i = 0; i < wv.size(); ++i) {
++                    const size_t j = size_t(std::lround(double(i) * double(w.size() - 1) / double(wv.size() - 1)));
++                    sq += (wv[i] - w[j]) * (wv[i] - w[j]);
++                    mean += w[j];
++                }
++                trackAbs.add(std::sqrt(sq / double(wv.size())));
++                trackRel.add(std::sqrt(sq / double(wv.size())) / std::max(mean / double(wv.size()), 1e-9));
++            }
++        }
++
++        // 6b. Профиль толщины: концы против тела, по проекции на эталон.
++        {
++            constexpr double kEndZone = 10.0; // px дуги эталона
++            std::vector<double> gtArc(gt.size(), 0.0);
++            for (size_t i = 1; i < gt.size(); ++i)
++                gtArc[i] = gtArc[i - 1] + len(gt[i] - gt[i - 1]);
++            const double total = gtArc.back();
++            const double zone = std::min(kEndZone, total / 3.0);
++            double maxGtW = 0.0;
++            for (double p : gtPressure)
++                maxGtW = std::max(maxGtW, truthWidthPx(p, scale, options));
++            const double bodyMargin = 3.0 * maxGtW;
++            std::vector<double> bodyW, bodyWGt;
++            for (size_t i = 0; i < center.size(); ++i) {
++                int seg = -1;
++                double u = 0.0;
++                gtIndex.distance(center[i], &seg, &u);
++                if (seg < 0)
++                    continue;
++                const size_t a = size_t(seg), b = std::min(size_t(seg) + 1, gt.size() - 1);
++                const double s = gtArc[a] + (gtArc[b] - gtArc[a]) * u;
++                const double pr = gtPressure[a] + (gtPressure[b] - gtPressure[a]) * u;
++                const double wGt = truthWidthPx(pr, scale, options);
++                const double err = std::abs(centerWidth[i] - wGt);
++                if (s < zone)
++                    widthStartErr.add(err);
++                else if (total - s < zone)
++                    widthEndErr.add(err);
++                else
++                    widthBodyErr.add(err);
++                if (s > bodyMargin && total - s > bodyMargin) {
++                    bodyW.push_back(centerWidth[i]);
++                    bodyWGt.push_back(wGt);
++                }
++            }
++            const auto cv = [](const std::vector<double> &v) {
++                if (v.size() < 4)
++                    return std::numeric_limits<double>::quiet_NaN();
++                const double m = std::accumulate(v.begin(), v.end(), 0.0) / v.size();
++                double q = 0.0;
++                for (double x : v)
++                    q += (x - m) * (x - m);
++                return m > 0 ? std::sqrt(q / v.size()) / m : std::numeric_limits<double>::quiet_NaN();
++            };
++            widthCv.add(cv(bodyW));
++            widthCvGt.add(cv(bodyWGt));
++            // Скачок толщины на 1 px дуги осевой.
++            std::vector<QPointF> cp, u;
++            std::vector<double> cw, w;
++            for (size_t i = 0; i < center.size(); ++i) {
++                if (cp.empty() || len(center[i] - cp.back()) > 1e-6) {
++                    cp.push_back(center[i]);
++                    cw.push_back(centerWidth[i]);
++                }
++            }
++            resample(cp, cw, 1.0, u, w);
++            for (size_t i = 1; i < w.size(); ++i)
++                widthStepMax = std::max(widthStepMax, std::abs(w[i] - w[i - 1]));
++            std::vector<double> gw;
++            for (double p : gtPressure)
++                gw.push_back(truthWidthPx(p, scale, options));
++            resample(gt, gw, 1.0, u, w);
++            for (size_t i = 1; i < w.size(); ++i)
++                widthStepMaxGt = std::max(widthStepMaxGt, std::abs(w[i] - w[i - 1]));
++        }
++
++        // 6б. Следование толщины за давлением (exp/dry-refine).
++        //  - width_err: |толщина варианта − эталонная толщина в ближайшей
++        //    точке эталона| вдоль осевой (шаг 1 px), экранные px;
++        //  - pressure_lag_ms: сдвиг δ, при котором давление осевой лучше всего
++        //    совпадает с эталоном p_gt(t − δ); время осевой переводится во
++        //    время эталона через среднюю разность меток отсчётов;
++        //  - торцы: толщина первой/последней точки осевой к эталонной толщине
++        //    на касании/отрыве и наибольший скачок толщины на последних 3 точках.
++        {
++            std::vector<double> gw;
++            for (double p : gtPressure)
++                gw.push_back(truthWidthPx(p, scale, options));
++            std::vector<QPointF> cp, u;
++            std::vector<double> cw, w;
++            for (size_t i = 0; i < center.size(); ++i) {
++                if (cp.empty() || len(center[i] - cp.back()) > 1e-6) {
++                    cp.push_back(center[i]);
++                    cw.push_back(centerWidth[i]);
++                }
++            }
++            resample(cp, cw, 1.0, u, w);
++            for (size_t i = 0; i < u.size(); ++i) {
++                int seg = -1;
++                double uu = 0;
++                gtIndex.distance(u[i], &seg, &uu);
++                if (seg < 0)
++                    continue;
++                const double g = gw[size_t(seg)] + (gw[size_t(seg) + 1] - gw[size_t(seg)]) * uu;
++                widthErr.add(std::abs(w[i] - g));
++                widthErrRel.add(std::abs(w[i] - g) / std::max(g, 1e-6));
++            }
++            if (!centerWidth.empty() && !gw.empty()) {
++                widthTouch.add(centerWidth.front() / std::max(gw.front(), 1e-6));
++                widthLift.add(centerWidth.back() / std::max(gw.back(), 1e-6));
++                double jump = 0;
++                for (size_t i = centerWidth.size() >= 4 ? centerWidth.size() - 3 : 1;
++                     i < centerWidth.size(); ++i)
++                    jump = std::max(jump, std::abs(centerWidth[i] - centerWidth[i - 1])
++                                              / std::max(centerWidth[i - 1], 1e-6));
++                widthEndJump.add(jump);
++                // То же у эталона, нарезанного с шагом 1.2 px (как осевая на
++                // масштабе 1): насколько скачок на конце задан самим нажимом.
++                std::vector<QPointF> gu;
++                std::vector<double> gwu;
++                resample(gt, gw, 1.2, gu, gwu);
++                gwu.push_back(gw.back());
++                double jumpGt = 0;
++                for (size_t i = gwu.size() >= 4 ? gwu.size() - 3 : 1; i < gwu.size(); ++i)
++                    jumpGt = std::max(jumpGt, std::abs(gwu[i] - gwu[i - 1]) / std::max(gwu[i - 1], 1e-6));
++                widthEndJumpGt.add(jumpGt);
++            }
++            // Сдвиг давления.
++            double offset = 0;
++            int n = 0;
++            for (size_t k = 0; k < stroke.events.size() && k < stroke.eventTrueTime.size(); ++k) {
++                offset += stroke.events[k].timeSeconds - stroke.eventTrueTime[k];
++                ++n;
++            }
++            if (n > 0)
++                offset /= n;
++            const auto pAt = [&](double t) {
++                const std::vector<double> &tt = stroke.truth.t;
++                if (t <= tt.front())
++                    return stroke.truth.pressure.front();
++                if (t >= tt.back())
++                    return stroke.truth.pressure.back();
++                const size_t j = size_t(std::upper_bound(tt.begin(), tt.end(), t) - tt.begin());
++                const double a = (t - tt[j - 1]) / std::max(tt[j] - tt[j - 1], 1e-12);
++                return stroke.truth.pressure[j - 1]
++                    + (stroke.truth.pressure[j] - stroke.truth.pressure[j - 1]) * a;
++            };
++            double bestErr = std::numeric_limits<double>::infinity(), bestShift = 0, zeroErr = 0;
++            for (int s = -60; s <= 240; ++s) {
++                const double shift = s * 0.0005;
++                double e = 0;
++                int m = 0;
++                for (const CenterPoint &c : run.centerline) {
++                    if (c.pressure < 0)
++                        continue;
++                    e += std::abs(c.pressure - pAt(c.time - offset - shift));
++                    ++m;
++                }
++                if (m == 0)
++                    break;
++                e /= m;
++                if (s == 0)
++                    zeroErr = e;
++                if (e < bestErr) {
++                    bestErr = e;
++                    bestShift = shift;
++                }
++            }
++            if (std::isfinite(bestErr)) {
++                pressureLag.add(bestShift * 1000.0);
++                pressureErr.add(zeroErr);
++            }
+         }
+ 
+         // 5. Площадь замкнутой буквы - по первому штриху.
+@@ -407,10 +906,17 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+                 worst = std::max(worst, centerIndex.distance(p));
+             wetFinal.add(worst);
+         }
++
++        // 8. Кадры: зазор перо -> кончик, перелёт, втягивание, виляние.
++        accumulateFrames(stroke, run, center, centerIndex, frames);
+     }
+ 
+-    for (double d : cornerBest)
+-        corner.add(d);
++    for (size_t ci = 0; ci < cornerBest.size(); ++ci) {
++        corner.add(cornerBest[ci]);
++        if (qEnvironmentVariableIsSet("STROKE_LAB_DEBUG_CORNERS"))
++            std::fprintf(stderr, "corner %s #%zu (%.1f,%.1f): %.3f\n", sample.id.c_str(), ci,
++                         corners[ci].x(), corners[ci].y(), cornerBest[ci]);
++    }
+ 
+     QJsonObject m;
+     const auto r = [](double v, int digits = 3) {
+@@ -453,6 +959,31 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+     m["width_mean_ratio"] = r(widthCount > 0 && widthSumGt > 0
+                                   ? (widthSum / widthCount) / (widthSumGt / widthCountGt)
+                                   : std::numeric_limits<double>::quiet_NaN());
++    m["width_rise_px"] = r(riseV.mean(), 2);
++    m["width_rise_truth_px"] = r(riseGt.mean(), 2);
++    m["width_fall_px"] = r(fallV.mean(), 2);
++    m["width_fall_truth_px"] = r(fallGt.mean(), 2);
++    m["width_start_ratio"] = r(startRatioV.mean());
++    m["width_start_ratio_truth"] = r(startRatioGt.mean());
++    m["width_end_ratio"] = r(endRatioV.mean());
++    m["width_end_ratio_truth"] = r(endRatioGt.mean());
++    m["width_track_rms_px"] = r(trackAbs.mean(), 4);
++    m["width_track_rms_rel"] = r(trackRel.mean(), 4);
++    m["width_start_err_px"] = r(widthStartErr.mean(), 4);
++    m["width_end_err_px"] = r(widthEndErr.mean(), 4);
++    m["width_body_err_px"] = r(widthBodyErr.mean(), 4);
++    m["width_step_max_px"] = r(widthStepMax, 4);
++    m["width_step_max_truth_px"] = r(widthStepMaxGt, 4);
++    m["width_body_cv"] = r(widthCv.mean(), 4);
++    m["width_body_cv_truth"] = r(widthCvGt.mean(), 4);
++    m["width_err_mean_px"] = r(widthErr.mean(), 4);
++    m["width_err_rel_mean_pct"] = r(widthErrRel.mean() * 100.0, 2);
++    m["width_touch_ratio"] = r(widthTouch.mean());
++    m["width_lift_ratio"] = r(widthLift.mean());
++    m["width_end_jump_max_pct"] = r(widthEndJump.max() * 100.0, 2);
++    m["width_end_jump_truth_max_pct"] = r(widthEndJumpGt.max() * 100.0, 2);
++    m["pressure_lag_ms"] = r(pressureLag.mean(), 2);
++    m["pressure_err_mean"] = r(pressureErr.mean(), 4);
+     m["wet_lag_px_mean"] = r(lagPx.mean());
+     m["wet_lag_px_p95"] = r(lagPx.pct(0.95));
+     m["wet_lag_px_max"] = r(lagPx.max());
+@@ -461,6 +992,26 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
+     m["wet_lag_ms_p95"] = r(lagMs.pct(0.95), 2);
+     m["wet_vs_final_mean_px"] = r(wetFinal.mean());
+     m["wet_vs_final_max_px"] = r(wetFinal.max());
++    for (int li = 0; li < kLatencyCount; ++li) {
++        const QString suffix = QStringLiteral("_L%1").arg(int(std::lround(kFrameLatencies[li] * 1000)));
++        m["frame_gap_px_mean" + suffix] = r(frames.gap[li].mean());
++        m["frame_gap_px_med" + suffix] = r(median(frames.gap[li]));
++        m["frame_gap_px_p95" + suffix] = r(frames.gap[li].pct(0.95));
++        m["frame_gap_fast_px_med" + suffix] =
++            frames.gapFast[li].v.empty() ? QJsonValue() : r(median(frames.gapFast[li]));
++        m["frame_gap_ms_med" + suffix] = r(median(frames.gapMs[li]), 2);
++        m["frame_ahead_px_p99" + suffix] = r(frames.ahead[li].pct(0.99));
++        m["frame_ahead_px_max" + suffix] = r(frames.ahead[li].max());
++    }
++    m["frame_offpath_px_p99"] = r(frames.offpath.pct(0.99));
++    m["frame_offpath_px_max"] = r(frames.offpath.max());
++    m["frame_retract_px_p95"] = r(frames.retract.pct(0.95));
++    m["frame_retract_px_p99"] = r(frames.retract.pct(0.99));
++    m["frame_wag_deg_p95"] = r(frames.wag.pct(0.95));
++    m["frame_heading_err_deg_p95"] = r(frames.heading.pct(0.95));
++    m["frame_tail_vs_final_px_p95"] = r(frames.tailFinal.pct(0.95));
++    m["frame_tail_vs_final_px_p99"] = r(frames.tailFinal.pct(0.99));
++    m["frame_lift_ahead_px_max"] = r(frames.liftAhead.max());
+     m["settled_mutations"] = mutations;
+     m["cpu_us_per_event_mean"] = r(cpu.mean(), 2);
+     m["cpu_us_per_event_p50"] = r(cpu.pct(0.5), 2);
+diff --git a/tools/stroke-lab/metrics.h b/tools/stroke-lab/metrics.h
+index f590c50..a2cf908 100644
+--- a/tools/stroke-lab/metrics.h
++++ b/tools/stroke-lab/metrics.h
+@@ -19,6 +19,7 @@ struct EventRecord
+     std::vector<QPointF> provisional;   // провизорный хвост
+     double cpuMicros = 0.0;             // addEvent, минимум по повторам
+     int wetDirtyVertices = 0;           // vertexCount - settledVertexCount
++    int settledCount = 0;               // окончательных точек после отсчёта
+ };
+ 
+ struct StrokeRun
+@@ -34,6 +35,10 @@ struct StrokeRun
+     // Снимок мокрого кадра (только у штриха, выбранного для снимка).
+     int wetSnapshotEvent = -1;
+     Geometry wetGeometry;
++    // Ещё несколько мокрых кадров того же штриха (первый - wetSnapshotEvent):
++    // лента кадров в wet/<tag>.png.
++    std::vector<int> wetFilmEvents;
++    std::vector<Geometry> wetFilmGeometry;
+ };
+ 
+ struct MetricsOptions
+diff --git a/tools/stroke-lab/raster.cpp b/tools/stroke-lab/raster.cpp
+index f669050..65fe56d 100644
+--- a/tools/stroke-lab/raster.cpp
++++ b/tools/stroke-lab/raster.cpp
+@@ -22,6 +22,14 @@ SamplePattern SamplePattern::grid(int n)
+     return p;
+ }
+ 
++SamplePattern SamplePattern::lattice64()
++{
++    SamplePattern p;
++    for (int i = 0; i < 64; ++i)
++        p.offsets.emplace_back((i + 0.5) / 64.0, ((19 * i) % 64 + 0.5) / 64.0);
++    return p;
++}
++
+ CoverageBuffer::CoverageBuffer(int width, int height, SamplePattern pattern)
+     : m_width(std::max(1, width))
+     , m_height(std::max(1, height))
+diff --git a/tools/stroke-lab/raster.h b/tools/stroke-lab/raster.h
+index 10eac80..07516f5 100644
+--- a/tools/stroke-lab/raster.h
++++ b/tools/stroke-lab/raster.h
+@@ -10,6 +10,10 @@
+ //   pixel = bg + (ink - bg) * (covered / 4).
+ // Шаблон точек - стандартный 4x (D3D10+/GL, его же даёт Mesa на Intel):
+ // (0.375,0.125) (0.875,0.375) (0.125,0.625) (0.625,0.875) в долях пикселя.
++// Замер на Iris Xe (tools/stroke-lab/gpu/bench.cpp, Mesa GL): в кадре OpenGL
++// начало координат внизу, поэтому в координатах картинки (y вниз) шаблон
++// отражён по y: с отражённым шаблоном эмуляция совпадает с GPU до 1% пикселей
++// (с этим - нет, RMS 30-39). Статистика качества от отражения не меняется.
+ // Пересечения треугольников полосы на непрозрачном цвете ничего не меняют -
+ // покрытие считается объединением.
+ //
+@@ -32,6 +36,11 @@ struct SamplePattern
+ 
+     static SamplePattern msaa4();
+     static SamplePattern grid(int n); // n*n, n <= 8
++    // 64 точки решётки ранга 1 (x = (i+0.5)/64, y = ((19·i) mod 64 + 0.5)/64):
++    // 64 разных уровня и по x, и по y. У grid(8) почти горизонтальная кромка
++    // даёт только 8 уровней (ошибка до 1/16), что для эталона аналитического
++    // сглаживания слишком грубо.
++    static SamplePattern lattice64();
+ };
+ 
+ class CoverageBuffer
+diff --git a/tools/stroke-lab/rastermetrics.cpp b/tools/stroke-lab/rastermetrics.cpp
+new file mode 100644
+index 0000000..1fbc409
+--- /dev/null
++++ b/tools/stroke-lab/rastermetrics.cpp
+@@ -0,0 +1,443 @@
++#include "rastermetrics.h"
++
++#include <QTransform>
++
++#include <algorithm>
++#include <cmath>
++#include <map>
++#include <numeric>
++#include <unordered_map>
++
++#include "aaraster.h"
++#include "raster.h"
++
++namespace lab {
++
++namespace {
++
++double len(const QPointF &v) { return std::hypot(v.x(), v.y()); }
++
++Geometry mapGeometry(const Geometry &g, const QTransform &T)
++{
++    Geometry out = g;
++    for (QPointF &p : out.vertices)
++        p = T.map(p);
++    for (QPolygonF &ring : out.polygons)
++        ring = T.map(ring);
++    return out;
++}
++
++template<class Buffer>
++void addMapped(Buffer &buffer, const Geometry &g)
++{
++    switch (g.kind) {
++    case Geometry::Kind::TriangleStrip:
++        buffer.addTriangleStrip(g.vertices);
++        break;
++    case Geometry::Kind::Triangles:
++        buffer.addTriangles(g.vertices);
++        break;
++    default:
++        break;
++    }
++}
++
++void addSweptBrush(CoverageBuffer &buffer, const std::vector<QPointF> &pts,
++                   const std::vector<double> &radius)
++{
++    for (size_t i = 0; i < pts.size(); ++i) {
++        buffer.addDisc(pts[i], radius[i]);
++        if (i + 1 < pts.size()) {
++            const QPointF d = pts[i + 1] - pts[i];
++            const double l = len(d);
++            if (l < 1e-9)
++                continue;
++            const QPointF n(-d.y() / l, d.x() / l);
++            buffer.addConvex({pts[i] + n * radius[i], pts[i + 1] + n * radius[i + 1],
++                              pts[i + 1] - n * radius[i + 1], pts[i] - n * radius[i]});
++        }
++    }
++}
++
++QSize imageSize(const Sample &sample, const RenderOptions &options)
++{
++    // +1 px запаса под субпиксельный сдвиг.
++    return QSize(std::max(1, int(std::ceil(sample.bounds.width() * options.dpr)) + 1),
++                 std::max(1, int(std::ceil(sample.bounds.height() * options.dpr)) + 1));
++}
++
++// Как renderApp, но с произвольным pageToPixel и цветом (возможно,
++// полупрозрачным).
++QImage renderAppAt(const std::vector<StrokeRun> &runs, const QTransform &T, const QSize &size,
++                   const QColor &paper, const QColor &ink)
++{
++    QImage image(size, QImage::Format_RGB32);
++    image.fill(paper);
++    const bool translucent = ink.alpha() < 255;
++    CoverageBuffer msaa(size.width(), size.height(), SamplePattern::msaa4());
++    SampleCountBuffer counted(size.width(), size.height(), SamplePattern::msaa4());
++    bool anyMsaa = false;
++    std::vector<const StrokeRun *> own;
++    for (const StrokeRun &run : runs) {
++        QImage probe = image;
++        RasterTarget target{&probe, T, ink};
++        if (run.variant && run.variant->rasterize(run.geometry, target)) {
++            own.push_back(&run);
++            continue;
++        }
++        const Geometry g = mapGeometry(run.geometry, T);
++        anyMsaa = true;
++        if (g.kind == Geometry::Kind::Polygons) {
++            msaa.addPolygons(g.polygons);
++        } else if (translucent) {
++            addMapped(counted, g);
++        } else {
++            addMapped(msaa, g);
++        }
++    }
++    if (anyMsaa) {
++        msaa.compositeOnto(image, ink);
++        if (translucent)
++            counted.compositeOnto(image, ink);
++    }
++    for (const StrokeRun *run : own) {
++        RasterTarget target{&image, T, ink};
++        run->variant->rasterize(run->geometry, target);
++    }
++    return image;
++}
++
++// Покрытие из цвета: проекция на отрезок бумага -> чернила (rgb без альфы).
++std::vector<float> coverageOf(const QImage &image, const QColor &paper, const QColor &ink)
++{
++    const double dr = paper.red() - ink.red(), dg = paper.green() - ink.green(),
++                 db = paper.blue() - ink.blue();
++    const double n2 = dr * dr + dg * dg + db * db;
++    std::vector<float> c(size_t(image.width()) * size_t(image.height()), 0.0f);
++    for (int y = 0; y < image.height(); ++y) {
++        const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
++        for (int x = 0; x < image.width(); ++x) {
++            const double v = ((paper.red() - qRed(line[x])) * dr
++                              + (paper.green() - qGreen(line[x])) * dg
++                              + (paper.blue() - qBlue(line[x])) * db)
++                             / n2;
++            c[size_t(y) * size_t(image.width()) + size_t(x)] = float(v);
++        }
++    }
++    return c;
++}
++
++std::vector<float> coverageOf(const CoverageBuffer &buffer)
++{
++    std::vector<float> c(size_t(buffer.width()) * size_t(buffer.height()));
++    for (int y = 0; y < buffer.height(); ++y)
++        for (int x = 0; x < buffer.width(); ++x)
++            c[size_t(y) * size_t(buffer.width()) + size_t(x)] = float(buffer.coverage(x, y));
++    return c;
++}
++
++std::vector<float> shapeCoverage(const std::vector<StrokeRun> &runs, const QTransform &T,
++                                 const QSize &size)
++{
++    CoverageBuffer buffer(size.width(), size.height(), SamplePattern::lattice64());
++    for (const StrokeRun &run : runs) {
++        const Geometry g = mapGeometry(run.geometry, T);
++        if (g.kind == Geometry::Kind::Polygons)
++            buffer.addPolygons(g.polygons);
++        else
++            addMapped(buffer, g);
++    }
++    return coverageOf(buffer);
++}
++
++std::vector<float> idealCoverage(const std::vector<StrokeRun> &runs, const QTransform &T,
++                                 double toPixel, const QSize &size)
++{
++    CoverageBuffer buffer(size.width(), size.height(), SamplePattern::lattice64());
++    for (const StrokeRun &run : runs) {
++        std::vector<QPointF> pts;
++        std::vector<double> radius;
++        for (const CenterPoint &c : run.centerline) {
++            pts.push_back(T.map(c.pos));
++            radius.push_back(c.width * toPixel / 2.0);
++        }
++        addSweptBrush(buffer, pts, radius);
++    }
++    return coverageOf(buffer);
++}
++
++std::vector<float> truthCoverage(const Sample &sample, double scale, const RenderOptions &options,
++                                 const QPointF &shift, const QSize &size)
++{
++    CoverageBuffer buffer(size.width(), size.height(), SamplePattern::lattice64());
++    for (const SampleStroke &stroke : sample.strokes) {
++        std::vector<QPointF> pts;
++        std::vector<double> radius;
++        for (size_t i = 0; i < stroke.truth.p.size(); ++i) {
++            const QPointF p = stroke.truth.p[i] * options.dpr + shift;
++            if (!pts.empty() && len(p - pts.back()) < 0.4 && i + 1 < stroke.truth.p.size())
++                continue;
++            pts.push_back(p);
++            radius.push_back(truthWidthPx(stroke.truth.pressure[i], scale, options.metrics)
++                             * options.dpr / 2.0);
++        }
++        addSweptBrush(buffer, pts, radius);
++    }
++    return coverageOf(buffer);
++}
++
++bool partial(float c) { return c > 0.002f && c < 0.998f; }
++
++struct ErrStats
++{
++    double rmse = 0, p99 = 0, max = 0;
++    int count = 0;
++};
++
++ErrStats edgeError(const std::vector<float> &a, const std::vector<float> &b)
++{
++    std::vector<double> errs;
++    for (size_t i = 0; i < a.size(); ++i) {
++        if (!partial(a[i]) && !partial(b[i]))
++            continue;
++        errs.push_back(std::abs(double(a[i]) - double(b[i])) * 255.0);
++    }
++    ErrStats s;
++    s.count = int(errs.size());
++    if (errs.empty())
++        return s;
++    double sq = 0;
++    for (double e : errs)
++        sq += e * e;
++    s.rmse = std::sqrt(sq / errs.size());
++    std::sort(errs.begin(), errs.end());
++    s.p99 = errs[std::min(errs.size() - 1, size_t(errs.size() * 0.99))];
++    s.max = errs.back();
++    return s;
++}
++
++// Масса по отрезкам осевой: «бусины».
++double massCv(const std::vector<StrokeRun> &runs, const QTransform &T,
++              const std::vector<float> &render, const std::vector<float> &ideal, const QSize &size)
++{
++    constexpr double kBin = 2.0;
++    constexpr double kEnd = 3.0;
++    struct P
++    {
++        QPointF p;
++        double arc;
++        double total;
++        int run;
++    };
++    std::vector<P> pts;
++    double maxR = 0;
++    for (size_t r = 0; r < runs.size(); ++r) {
++        double arc = 0;
++        const size_t first = pts.size();
++        for (size_t i = 0; i < runs[r].centerline.size(); ++i) {
++            const QPointF p = T.map(runs[r].centerline[i].pos);
++            if (i > 0)
++                arc += len(p - pts.back().p);
++            pts.push_back({p, arc, 0, int(r)});
++            maxR = std::max(maxR, runs[r].centerline[i].width * std::sqrt(std::abs(T.determinant())) / 2);
++        }
++        for (size_t i = first; i < pts.size(); ++i)
++            pts[i].total = arc;
++    }
++    if (pts.empty())
++        return 0;
++    // Сетка 4 px для поиска ближайшей точки.
++    constexpr double kCell = 4.0;
++    std::unordered_map<long long, std::vector<int>> grid;
++    const auto key = [](int x, int y) { return (long long)(x) * 1000003LL + y; };
++    for (size_t i = 0; i < pts.size(); ++i)
++        grid[key(int(std::floor(pts[i].p.x() / kCell)), int(std::floor(pts[i].p.y() / kCell)))]
++            .push_back(int(i));
++    const double reach = maxR + 2.0;
++    const int ring = int(std::ceil(reach / kCell)) + 1;
++    std::map<std::pair<int, int>, std::pair<double, double>> bins; // (run, bin) -> (render, ideal)
++    for (int y = 0; y < size.height(); ++y) {
++        for (int x = 0; x < size.width(); ++x) {
++            const size_t idx = size_t(y) * size_t(size.width()) + size_t(x);
++            const double cr = std::max(0.0f, render[idx]);
++            const double ci = ideal[idx];
++            if (cr <= 0.002 && ci <= 0.002)
++                continue;
++            const QPointF c(x + 0.5, y + 0.5);
++            const int gx = int(std::floor(c.x() / kCell)), gy = int(std::floor(c.y() / kCell));
++            int best = -1;
++            double bestD = reach;
++            for (int dy = -ring; dy <= ring; ++dy) {
++                for (int dx = -ring; dx <= ring; ++dx) {
++                    const auto it = grid.find(key(gx + dx, gy + dy));
++                    if (it == grid.end())
++                        continue;
++                    for (int i : it->second) {
++                        const double d = len(pts[size_t(i)].p - c);
++                        if (d < bestD) {
++                            bestD = d;
++                            best = i;
++                        }
++                    }
++                }
++            }
++            if (best < 0)
++                continue;
++            const P &p = pts[size_t(best)];
++            if (p.arc < kEnd || p.arc > p.total - kEnd)
++                continue;
++            auto &bin = bins[{p.run, int(p.arc / kBin)}];
++            bin.first += cr;
++            bin.second += ci;
++        }
++    }
++    std::vector<double> ratios;
++    double medianIdeal = 0;
++    {
++        std::vector<double> m;
++        for (const auto &[k, v] : bins)
++            m.push_back(v.second);
++        if (m.empty())
++            return 0;
++        std::nth_element(m.begin(), m.begin() + m.size() / 2, m.end());
++        medianIdeal = m[m.size() / 2];
++    }
++    for (const auto &[k, v] : bins)
++        if (v.second > 0.3 * medianIdeal)
++            ratios.push_back(v.first / v.second);
++    if (ratios.size() < 2)
++        return 0;
++    const double mean = std::accumulate(ratios.begin(), ratios.end(), 0.0) / ratios.size();
++    double var = 0;
++    for (double r : ratios)
++        var += (r - mean) * (r - mean);
++    var /= ratios.size();
++    return mean > 0 ? std::sqrt(var) / mean : 0;
++}
++
++} // namespace
++
++RasterMetricsResult computeRasterMetrics(const Sample &sample, const std::vector<StrokeRun> &runs,
++                                         double scale, const RenderOptions &options,
++                                         const RasterMetricsOptions &rasterOptions)
++{
++    RasterMetricsResult result;
++    QJsonObject &m = result.metrics;
++    const QSize size = imageSize(sample, options);
++    const double toPixel = scale * options.dpr;
++    const int shifts = std::max(1, rasterOptions.shifts);
++    const size_t npx = size_t(size.width()) * size_t(size.height());
++
++    std::vector<std::vector<float>> errs; // вариант − форма, по сдвигам
++    std::vector<double> masses;
++    std::vector<float> render0, shape0;
++    double shapeSq = 0;
++    int shapeCount = 0;
++    double shapeP99 = 0, shapeMax = 0;
++    for (int k = 0; k < shifts; ++k) {
++        const QPointF shift(double(k) / shifts, double((k * 3) % shifts) / shifts);
++        QTransform T = QTransform::fromScale(toPixel, toPixel);
++        T *= QTransform::fromTranslate(shift.x(), shift.y());
++        const QImage image = renderAppAt(runs, T, size, options.paper, options.ink);
++        std::vector<float> cov = coverageOf(image, options.paper, options.ink);
++        std::vector<float> shape = shapeCoverage(runs, T, size);
++        const ErrStats e = edgeError(cov, shape);
++        shapeSq += e.rmse * e.rmse * e.count;
++        shapeCount += e.count;
++        shapeP99 += e.p99 / shifts;
++        shapeMax = std::max(shapeMax, e.max);
++        std::vector<float> err(npx);
++        double mass = 0;
++        for (size_t i = 0; i < npx; ++i) {
++            err[i] = cov[i] - shape[i];
++            mass += cov[i];
++        }
++        errs.push_back(std::move(err));
++        masses.push_back(mass);
++        if (k == 0) {
++            QImage map(size, QImage::Format_RGB32);
++            for (int y = 0; y < size.height(); ++y) {
++                QRgb *line = reinterpret_cast<QRgb *>(map.scanLine(y));
++                for (int x = 0; x < size.width(); ++x) {
++                    const size_t i = size_t(y) * size_t(size.width()) + size_t(x);
++                    const double e = std::clamp(double(cov[i] - shape[i]) * 4.0, -1.0, 1.0);
++                    const int base = 255 - int(std::lround(std::clamp(double(shape[i]), 0.0, 1.0) * 40));
++                    if (e >= 0)
++                        line[x] = qRgb(base, int(base * (1 - e)), int(base * (1 - e)));
++                    else
++                        line[x] = qRgb(int(base * (1 + e)), int(base * (1 + e)), base);
++                }
++            }
++            result.errorMap = map;
++            render0 = std::move(cov);
++            shape0 = std::move(shape);
++        }
++    }
++    m["aa_rmse_shape"] = shapeCount ? std::sqrt(shapeSq / shapeCount) : 0.0;
++    m["aa_p99_shape"] = shapeP99;
++    m["aa_max_shape"] = shapeMax;
++
++    if (shifts > 1) {
++        double acc = 0;
++        int n = 0;
++        for (size_t i = 0; i < npx; ++i) {
++            double mean = 0;
++            bool any = false;
++            for (const auto &e : errs) {
++                mean += e[i];
++                any = any || std::abs(e[i]) > 0.002f;
++            }
++            if (!any)
++                continue;
++            mean /= shifts;
++            double var = 0;
++            for (const auto &e : errs)
++                var += (e[i] - mean) * (e[i] - mean);
++            acc += std::sqrt(var / shifts) * 255.0;
++            ++n;
++        }
++        m["aa_flicker"] = n ? acc / n : 0.0;
++        const double meanMass = std::accumulate(masses.begin(), masses.end(), 0.0) / shifts;
++        double var = 0;
++        for (double x : masses)
++            var += (x - meanMass) * (x - meanMass);
++        m["aa_mass_breath_pct"] = meanMass > 0 ? 100.0 * std::sqrt(var / shifts) / meanMass : 0.0;
++    }
++
++    const QTransform T0 = QTransform::fromScale(toPixel, toPixel);
++    const std::vector<float> ideal = idealCoverage(runs, T0, toPixel, size);
++    const std::vector<float> truth = truthCoverage(sample, scale, options, QPointF(), size);
++    m["aa_rmse_ideal"] = edgeError(render0, ideal).rmse;
++    m["aa_rmse_truth"] = edgeError(render0, truth).rmse;
++    double massR = 0, massI = 0;
++    for (size_t i = 0; i < npx; ++i) {
++        massR += render0[i];
++        massI += ideal[i];
++    }
++    m["aa_mass_ratio"] = massI > 0 ? massR / massI : 0.0;
++    m["aa_mass_cv"] = massCv(runs, T0, render0, ideal, size);
++
++    if (rasterOptions.marker) {
++        const QColor marker = rasterOptions.markerColor;
++        QImage image = renderAppAt(runs, T0, size, options.paper, marker);
++        QColor opaque = marker;
++        opaque.setAlpha(255);
++        const std::vector<float> a = coverageOf(image, options.paper, opaque);
++        const double alpha = marker.alphaF();
++        int inked = 0, dark = 0;
++        double amax = 0;
++        for (float v : a) {
++            if (v > 0.01f)
++                ++inked;
++            if (v > alpha + 0.01)
++                ++dark;
++            amax = std::max(amax, double(v));
++        }
++        m["marker_dark_frac"] = inked ? double(dark) / inked : 0.0;
++        m["marker_alpha_max"] = amax;
++        result.marker = image;
++    }
++    return result;
++}
++
++} // namespace lab
+diff --git a/tools/stroke-lab/rastermetrics.h b/tools/stroke-lab/rastermetrics.h
+new file mode 100644
+index 0000000..3ce1700
+--- /dev/null
++++ b/tools/stroke-lab/rastermetrics.h
+@@ -0,0 +1,62 @@
++#pragma once
++
++// Метрики растеризации: насколько пиксели варианта близки к точному покрытию
++// и насколько они устойчивы к субпиксельному сдвигу. Траектория здесь не
++// оценивается - только «как та же геометрия легла в пиксели».
++//
++// Все ошибки - в долях покрытия ×255 (то же, что уровни яркости для чёрных
++// чернил на белом). Покрытие из картинки варианта восстанавливается проекцией
++// цвета пикселя на отрезок бумага -> чернила.
++//
++//  aa_rmse_shape / aa_p99_shape / aa_max_shape  - против точного покрытия
++//      собственной геометрии варианта (64 точки решётки ранга 1,
++//      SamplePattern::lattice64; ошибка эталона ~1/64): чистая ошибка
++//      сглаживания. Пиксели - только кромка: частичное покрытие хотя бы в
++//      одном из двух изображений.
++//  aa_rmse_ideal - против идеальной круглой кисти по осевой варианта (lattice64):
++//      сглаживание + форма стыков и торцов.
++//  aa_rmse_truth - против эталона (траектория без шума): всё вместе.
++//  aa_flicker - «дыхание» кромки при пане: pageToPixel сдвигается на
++//      shifts субпиксельных смещений, для каждого пикселя берётся std по
++//      сдвигам ошибки (вариант − точное покрытие формы), среднее по пикселям.
++//  aa_mass_breath_pct - std/mean суммарной массы чернил по сдвигам, %.
++//  aa_mass_ratio - масса чернил варианта / масса идеальной кисти (сдвиг 0).
++//  aa_mass_cv - «бусины»: масса чернил в отрезках осевой по 2 px,
++//      отношение вариант/идеал, коэффициент вариации по отрезкам.
++//  marker_dark_frac - тот же штрих полупрозрачным маркером (#66f2d024):
++//      доля пикселей маркера, где итоговая альфа больше 0.4 + 0.01 (двойное
++//      наложение на складках и самопересечениях); marker_alpha_max.
++
++#include <QColor>
++#include <QImage>
++#include <QJsonObject>
++
++#include <vector>
++
++#include "corpus.h"
++#include "metrics.h"
++#include "render.h"
++
++namespace lab {
++
++struct RasterMetricsOptions
++{
++    int shifts = 8;
++    bool marker = true;
++    QColor markerColor = QColor::fromRgba(0x66f2d024);
++};
++
++struct RasterMetricsResult
++{
++    QJsonObject metrics;
++    QImage marker; // 1:1, маркер на белом
++    // Карта ошибки сдвига 0: серый = 0, красный - вариант темнее точного
++    // покрытия формы, синий - светлее; насыщенность ×4.
++    QImage errorMap;
++};
++
++RasterMetricsResult computeRasterMetrics(const Sample &sample, const std::vector<StrokeRun> &runs,
++                                         double scale, const RenderOptions &options,
++                                         const RasterMetricsOptions &rasterOptions);
++
++} // namespace lab
+diff --git a/tools/stroke-lab/render.cpp b/tools/stroke-lab/render.cpp
+index 3326ed0..412dc25 100644
+--- a/tools/stroke-lab/render.cpp
++++ b/tools/stroke-lab/render.cpp
+@@ -197,26 +197,17 @@ QPointF focusPoint(const Sample &sample)
+     return best;
+ }
+ 
+-QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs, double scale,
+-                      const RenderOptions &options)
+-{
+-    const StrokeRun *run = nullptr;
+-    size_t strokeIndex = 0;
+-    for (size_t i = 0; i < runs.size(); ++i) {
+-        if (runs[i].wetSnapshotEvent >= 0) {
+-            run = &runs[i];
+-            strokeIndex = i;
+-            break;
+-        }
+-    }
+-    if (!run || strokeIndex >= sample.strokes.size())
+-        return {};
+-    const SampleStroke &stroke = sample.strokes[strokeIndex];
+-    const int k = run->wetSnapshotEvent;
+-    const EventRecord &event = run->events[size_t(k)];
++namespace {
+ 
++// Один мокрый кадр x4 вокруг кончика после отсчёта k.
++QImage renderWetTile(const SampleStroke &stroke, const EventRecord &event, int k,
++                     const Geometry &wet, double scale, const RenderOptions &options)
++{
+     constexpr int kZoom = 4;
+     constexpr double kW = 80.0, kH = 60.0;
++    // Где перо будет в момент фотона: L = 22 мс от отсчёта (эмуляция кадров в
++    // metrics.cpp, kFrameLatencies).
++    constexpr double kPhotonDelay = 0.022;
+     const QPointF origin = event.tip - QPointF(kW / 2, kH / 2);
+     const double toPixel = scale * options.dpr;
+ 
+@@ -224,7 +215,7 @@ QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs,
+                  QImage::Format_RGB32);
+     frame.fill(options.paper);
+     CoverageBuffer buffer(frame.width(), frame.height(), SamplePattern::msaa4());
+-    Geometry g = run->wetGeometry;
++    Geometry g = wet;
+     for (QPointF &p : g.vertices)
+         p = p - origin / scale;
+     for (QPolygonF &ring : g.polygons)
+@@ -238,20 +229,32 @@ QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs,
+     const auto map = [&](const QPointF &screen) {
+         return (screen - origin) * options.dpr * kZoom;
+     };
+-    // Эталон - тонкой зелёной линией.
+-    QPainterPath truth;
+-    bool first = true;
++    const double tk = stroke.eventTrueTime[size_t(k)];
++    // Эталон - тонкой зелёной линией до отсчёта, пурпурной - до фотона.
++    QPainterPath truth, ahead;
++    bool first = true, firstAhead = true;
++    QPointF photon = stroke.truth.p.back();
+     for (size_t i = 0; i < stroke.truth.p.size(); i += 5) {
+-        if (stroke.truth.t[i] > stroke.eventTrueTime[size_t(k)])
+-            break;
+-        if (first)
+-            truth.moveTo(map(stroke.truth.p[i]));
+-        else
+-            truth.lineTo(map(stroke.truth.p[i]));
+-        first = false;
++        const double t = stroke.truth.t[i];
++        if (t <= tk) {
++            if (first)
++                truth.moveTo(map(stroke.truth.p[i]));
++            else
++                truth.lineTo(map(stroke.truth.p[i]));
++            first = false;
++        } else if (t <= tk + kPhotonDelay) {
++            if (firstAhead)
++                ahead.moveTo(map(stroke.truth.p[i]));
++            else
++                ahead.lineTo(map(stroke.truth.p[i]));
++            firstAhead = false;
++            photon = stroke.truth.p[i];
++        }
+     }
+     painter.setPen(QPen(QColor(0, 200, 90), 1.2));
+     painter.drawPath(truth);
++    painter.setPen(QPen(QColor(200, 0, 200), 1.2, Qt::DashLine));
++    painter.drawPath(ahead);
+     painter.setPen(Qt::NoPen);
+     painter.setBrush(QColor(255, 150, 0));
+     for (int i = 0; i <= k; ++i)
+@@ -266,13 +269,68 @@ QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs,
+     painter.setPen(QPen(QColor(30, 90, 230), 1.5));
+     painter.drawLine(pen - QPointF(8, 0), pen + QPointF(8, 0));
+     painter.drawLine(pen - QPointF(0, 8), pen + QPointF(0, 8));
++    const QPointF ph = map(photon);
++    painter.setPen(QPen(QColor(200, 0, 200), 1.5));
++    painter.drawLine(ph - QPointF(6, 6), ph + QPointF(6, 6));
++    painter.drawLine(ph - QPointF(6, -6), ph + QPointF(6, -6));
+     painter.setPen(QColor(0, 0, 0));
+     painter.drawText(QPointF(6, 14),
+-                     QStringLiteral("event %1, lag %2 px").arg(k).arg(len(event.tip - stroke.events[size_t(k)].position), 0, 'f', 2));
++                     QStringLiteral("event %1, lag %2 px, pen@+22ms %3 px")
++                         .arg(k)
++                         .arg(len(event.tip - stroke.events[size_t(k)].position), 0, 'f', 2)
++                         .arg(len(event.tip - photon), 0, 'f', 1));
+     painter.end();
+     return big;
+ }
+ 
++} // namespace
++
++QImage renderWetFrame(const Sample &sample, const std::vector<StrokeRun> &runs, double scale,
++                      const RenderOptions &options)
++{
++    const StrokeRun *run = nullptr;
++    size_t strokeIndex = 0;
++    for (size_t i = 0; i < runs.size(); ++i) {
++        if (runs[i].wetSnapshotEvent >= 0) {
++            run = &runs[i];
++            strokeIndex = i;
++            break;
++        }
++    }
++    if (!run || strokeIndex >= sample.strokes.size())
++        return {};
++    const SampleStroke &stroke = sample.strokes[strokeIndex];
++    // Лента: все записанные кадры по порядку отсчётов (или один снимок).
++    std::vector<QImage> tiles;
++    if (!run->wetFilmEvents.empty()) {
++        for (size_t i = 0; i < run->wetFilmEvents.size(); ++i) {
++            const int k = run->wetFilmEvents[i];
++            tiles.push_back(renderWetTile(stroke, run->events[size_t(k)], k,
++                                          run->wetFilmGeometry[i], scale, options));
++        }
++    } else {
++        const int k = run->wetSnapshotEvent;
++        tiles.push_back(renderWetTile(stroke, run->events[size_t(k)], k, run->wetGeometry, scale,
++                                      options));
++    }
++    constexpr int kGap = 4;
++    int width = 0, height = 0;
++    for (const QImage &t : tiles) {
++        width += t.width() + kGap;
++        height = std::max(height, t.height());
++    }
++    QImage film(std::max(1, width - kGap), height, QImage::Format_RGB32);
++    film.fill(QColor(225, 225, 228));
++    QPainter painter(&film);
++    int x = 0;
++    for (const QImage &t : tiles) {
++        painter.drawImage(x, 0, t);
++        x += t.width() + kGap;
++    }
++    painter.end();
++    return film;
++}
++
+ QImage composeSheet(const std::vector<QString> &columnTitles,
+                     const std::vector<QString> &rowTitles,
+                     const std::vector<std::vector<QImage>> &cells, int zoom)
