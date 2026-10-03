@@ -62,6 +62,7 @@ target_compile_definitions(tst_crashrecovery PRIVATE
 uq_add_test(tst_notestore tst_notestore.cpp)
 uq_add_test(tst_export tst_export.cpp)
 uq_add_test(tst_idlepower tst_idlepower.cpp)
+uq_add_test(tst_framestats tst_framestats.cpp)
 
 # Единственное исключение из правила «тесты не открывают окон»: покой в простое
 # измеряется по кадрам, а под offscreen цикл рендера крутится вхолостую всегда

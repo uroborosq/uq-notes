@@ -17,6 +17,9 @@
 //   * интервал между `frameSwapped` - реальная частота выдачи кадров;
 //   * длительность отрисовки кадра (`beforeRendering` .. `afterFrameEnd`);
 //   * латентность от события ввода до кадра, в котором оно стало видимым.
+//     Отсчёт идёт от метки времени события (QInputEvent::timestamp()), а не
+//     от момента обработки: иначе в замер не попадает доставка события от
+//     композитора (design.md, D1).
 class FrameStats : public QObject
 {
     Q_OBJECT
@@ -66,15 +69,29 @@ public:
     int idleGapCount() const { return m_idleGapCount; }
     qreal lastLatencyMs() const { return m_lastLatencyMs; }
     qreal maxLatencyMs() const { return m_maxLatencyMs; }
+    // Сколько меток событий оказалось не в шкале CLOCK_MONOTONIC: для них
+    // латентность считалась от момента обработки. Не ноль на устройстве -
+    // замер занижен, и это видно в сводке.
+    int foreignInputStamps() const { return m_foreignInputStamps; }
     QString summary() const;
 
-    // Помечает момент прихода события ввода. Латентность закрывается в
-    // следующем показанном кадре.
-    Q_INVOKABLE void markInput();
+    // Помечает событие ввода. eventTimeSeconds - метка события в секундах той
+    // же шкалы, что QInputEvent::timestamp() / 1000; отрицательная - метки нет,
+    // и отсчёт идёт от момента вызова. Латентность закрывается в следующем
+    // показанном кадре.
+    Q_INVOKABLE void markInput(qreal eventTimeSeconds = -1.0);
     Q_INVOKABLE void reset();
 
     // Монотонные наносекунды от общего для всего приложения начала отсчёта.
     static qint64 nowNs();
+    // Метка события -> наносекунды шкалы nowNs(); -1, если метка не из этой
+    // шкалы. На Wayland timestamp() - поле time протокола: миллисекунды
+    // CLOCK_MONOTONIC композитора, усечённые до 32 бит (qwaylandtabletv2.cpp,
+    // zwp_tablet_tool_v2_frame). Поэтому сравниваются младшие 32 бита
+    // миллисекунд nowNs(), а разница берётся со знаком - так переживается
+    // переполнение раз в 49.7 суток. Метка правдоподобна, если событие не из
+    // будущего (с запасом 2 мс на округление) и не старше 5 с.
+    static qint64 eventTimeToNs(qreal eventTimeSeconds, qint64 nowNs);
 
 signals:
     void windowChanged();
@@ -115,4 +132,6 @@ private:
     mutable int m_sortedAtCount = -1;
     mutable qint64 m_sortedAtNs = 0;
     QTimer *m_logTimer = nullptr;
+
+    int m_foreignInputStamps = 0;
 };

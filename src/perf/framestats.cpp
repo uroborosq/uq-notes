@@ -7,9 +7,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 
 namespace {
 constexpr int kMaxSamples = 4096;
+// Окно правдоподобия метки события относительно момента обработки, мс.
+constexpr qint64 kStampFutureToleranceMs = 2;
+constexpr qint64 kStampMaxAgeMs = 5000;
 }
 
 qint64 FrameStats::nowNs()
@@ -85,6 +90,7 @@ void FrameStats::reset()
     m_lastIntervalMs = m_maxIntervalMs = m_maxRenderMs = 0.0;
     m_lastLatencyMs = m_maxLatencyMs = 0.0;
     m_frameCount = m_longFrameCount = m_idleGapCount = 0;
+    m_foreignInputStamps = 0;
     m_intervals.clear();
     m_sorted.clear();
     m_sortedAtCount = -1;
@@ -92,14 +98,37 @@ void FrameStats::reset()
     emit statsChanged();
 }
 
-void FrameStats::markInput()
+qint64 FrameStats::eventTimeToNs(qreal eventTimeSeconds, qint64 nowNs)
+{
+    if (eventTimeSeconds < 0.0 || nowNs <= 0)
+        return -1;
+    const qint64 nowMs = nowNs / 1'000'000;
+    const auto stampMs32 = uint32_t(std::llround(eventTimeSeconds * 1000.0) & 0xffffffffLL);
+    // Разница по модулю 2^32 со знаком: метка из прошлого даёт положительный
+    // возраст и тогда, когда младшие биты часов уже перевалили через ноль.
+    const qint64 ageMs = qint64(int32_t(uint32_t(nowMs) - stampMs32));
+    if (ageMs < -kStampFutureToleranceMs || ageMs > kStampMaxAgeMs)
+        return -1;
+    return (nowMs - ageMs) * 1'000'000;
+}
+
+void FrameStats::markInput(qreal eventTimeSeconds)
 {
     if (!m_active)
         return;
+    const qint64 now = nowNs();
+    qint64 input = eventTimeToNs(eventTimeSeconds, now);
+    if (input < 0) {
+        // Метка не из CLOCK_MONOTONIC (другой композитор, синтетика тестов) -
+        // остаётся момент обработки, а счётчик показывает, что замер занижен.
+        if (eventTimeSeconds >= 0.0)
+            ++m_foreignInputStamps;
+        input = now;
+    }
     // Держим самое раннее ещё не показанное событие: латентность считается по
     // нему, иначе поток промежуточных событий занижал бы результат.
     qint64 expected = 0;
-    m_pendingInputNs.compare_exchange_strong(expected, nowNs(), std::memory_order_relaxed);
+    m_pendingInputNs.compare_exchange_strong(expected, input, std::memory_order_relaxed);
 }
 
 void FrameStats::onBeforeRendering()
@@ -206,7 +235,7 @@ QString FrameStats::summary() const
 {
     return QStringLiteral("refresh %1 ms | frames %2 | median %3 | p99 %4 | max %5 | render max %6"
                           "\nlong frames (>2x refresh): %7 | idle gaps: %10"
-                          " | latency last %8 max %9 ms")
+                          " | latency (event stamp -> swap) last %8 max %9 ms | foreign stamps %11")
         .arg(m_refreshIntervalMs, 0, 'f', 2)
         .arg(m_frameCount)
         .arg(medianIntervalMs(), 0, 'f', 2)
@@ -216,5 +245,6 @@ QString FrameStats::summary() const
         .arg(m_longFrameCount)
         .arg(m_lastLatencyMs, 0, 'f', 1)
         .arg(m_maxLatencyMs, 0, 'f', 1)
-        .arg(m_idleGapCount);
+        .arg(m_idleGapCount)
+        .arg(m_foreignInputStamps);
 }

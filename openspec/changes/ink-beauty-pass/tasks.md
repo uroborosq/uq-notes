@@ -976,7 +976,7 @@ qtwayland):
   было на невидимом рабочем столе, поэтому `presented` там не проверен). Это
   остаётся ручным шагом 2.14.
 
-- [ ] 2.1 **Падающий тест: метка события в шкале `nowNs()`.** Создать `tests/tst_framestats.cpp`:
+- [x] 2.1 **Падающий тест: метка события в шкале `nowNs()`.** Создать `tests/tst_framestats.cpp`:
 ```cpp
 // ink-beauty-pass, шаг 0 (design.md, D1): честная латентность. Метка события
 // переводится в шкалу FrameStats::nowNs(), задержка до показа сводится по
@@ -1071,13 +1071,13 @@ QTEST_MAIN(TestFrameStats)
 uq_add_test(tst_framestats tst_framestats.cpp)
 ```
 
-- [ ] 2.2 **Прогнать - ожидаемый провал.**
+- [x] 2.2 **Прогнать - ожидаемый провал.**
 ```sh
 cmake --build build -j$(nproc) --target tst_framestats
 ```
   Ожидание: ошибка компиляции `tst_framestats.cpp`: у `FrameStats` нет членов `eventTimeToNs` и `foreignInputStamps`, `markInput` не принимает аргумент.
 
-- [ ] 2.3 **`FrameStats`: метка события, счётчик чужих меток.** В `src/perf/framestats.h`:
+- [x] 2.3 **`FrameStats`: метка события, счётчик чужих меток.** В `src/perf/framestats.h`:
   - в шапочном комментарии класса после строки `//   * латентность от события ввода до кадра, в котором оно стало видимым.` добавить:
 ```cpp
 //     Отсчёт идёт от метки времени события (QInputEvent::timestamp()), а не
@@ -1174,13 +1174,13 @@ void FrameStats::markInput(qreal eventTimeSeconds)
         .arg(m_foreignInputStamps);
 ```
 
-- [ ] 2.4 **Прогнать - ожидаемый проход.**
+- [x] 2.4 **Прогнать - ожидаемый проход.**
 ```sh
 cmake --build build -j$(nproc) --target tst_framestats && ctest --test-dir build -R tst_framestats --output-on-failure
 ```
   Ожидание: `tst_framestats` Passed, в выводе теста `Totals: 9 passed` (5 функций, у `foreignStampsAreRejected` три строки данных, плюс `initTestCase`/`cleanupTestCase`).
 
-- [ ] 2.5 **Падающий тест: холст передаёт метку события в `FrameStats`.** В `tests/tst_canvasink.cpp` добавить включения `#include <QScopeGuard>` и `#include <cstdint>` к блоку `#include <Q...>`, `#include "perf/framestats.h"` - к блоку проектных; после функции `inkPointsTakeTimeFromTheEvent()` добавить:
+- [x] 2.5 **Падающий тест: холст передаёт метку события в `FrameStats`.** В `tests/tst_canvasink.cpp` добавить включения `#include <QScopeGuard>` и `#include <cstdint>` к блоку `#include <Q...>`, `#include "perf/framestats.h"` - к блоку проектных; после функции `inkPointsTakeTimeFromTheEvent()` добавить:
 ```cpp
     // ink-beauty-pass, D1: латентность пера отсчитывается от метки события, а
     // не от момента, когда холст его обработал. Метка не из CLOCK_MONOTONIC
@@ -1217,13 +1217,13 @@ cmake --build build -j$(nproc) --target tst_framestats && ctest --test-dir build
     }
 ```
 
-- [ ] 2.6 **Прогнать - ожидаемый провал.**
+- [x] 2.6 **Прогнать - ожидаемый провал.**
 ```sh
 cmake --build build -j$(nproc) --target tst_canvasink && ctest --test-dir build -R tst_canvasink --output-on-failure
 ```
   Ожидание: `FAIL! : TestCanvasInk::inputLatencyStartsAtEventStamp() Compared values are not the same Actual (stats.foreignInputStamps()): 0 Expected (1): 1` - холст зовёт `markInput()` без метки.
 
-- [ ] 2.7 **Холст передаёт метку.** В `src/canvas/documentcanvas.cpp`, в `DocumentCanvas::beginInkAt` (после `m_wet.addPoint(...)`) и в `DocumentCanvas::continueInkAt` (после `m_wet.addPoint(...)`) заменить
+- [x] 2.7 **Холст передаёт метку.** В `src/canvas/documentcanvas.cpp`, в `DocumentCanvas::beginInkAt` (после `m_wet.addPoint(...)`) и в `DocumentCanvas::continueInkAt` (после `m_wet.addPoint(...)`) заменить
 ```cpp
     if (m_frameStats)
         m_frameStats->markInput();
@@ -1237,13 +1237,13 @@ cmake --build build -j$(nproc) --target tst_canvasink && ctest --test-dir build 
 ```
   Вызов в `eraseAt` не трогать: времени события там нет, ластик замеру задержки пера не нужен.
 
-- [ ] 2.8 **Прогнать - ожидаемый проход, без регрессий.**
+- [x] 2.8 **Прогнать - ожидаемый проход, без регрессий.**
 ```sh
 cmake --build build -j$(nproc) && ctest --test-dir build -R 'tst_(canvasink|framestats|idlepower|wetstroke)' --output-on-failure
 ```
   Ожидание: все четыре Passed.
 
-- [ ] 2.9 **Коммит.**
+- [x] 2.9 **Коммит.**
 ```sh
 git add src/perf/framestats.h src/perf/framestats.cpp src/canvas/documentcanvas.cpp tests/tst_framestats.cpp tests/tst_canvasink.cpp tests/CMakeLists.txt
 git commit -F - <<'EOF'

@@ -4,15 +4,19 @@
 
 #include <QMouseEvent>
 #include <QPointingDevice>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTouchEvent>
+
+#include <cstdint>
 
 #include "canvas/documentcanvas.h"
 #include "fixtures.h"
 #include "ink/inkdocument.h"
 #include "ink/stroketessellator.h"
 #include "pdf/pdfdocumentmodel.h"
+#include "perf/framestats.h"
 #include "storage/notestore.h"
 
 class TestCanvasInk : public QObject
@@ -473,6 +477,40 @@ private slots:
                                     .arg(startMs / 1000.0, 0, 'f', 3)
                                     .arg(endMs / 1000.0, 0, 'f', 3)));
         }
+    }
+
+    // ink-beauty-pass, D1: латентность пера отсчитывается от метки события, а
+    // не от момента, когда холст его обработал. Метка не из CLOCK_MONOTONIC
+    // не теряется молча, а видна в сводке кадров.
+    void inputLatencyStartsAtEventStamp()
+    {
+        FrameStats stats;
+        m_canvas.setFrameStats(&stats);
+        const auto restore = qScopeGuard([this] {
+            m_canvas.cancelInk();
+            m_canvas.setFrameStats(nullptr);
+        });
+        m_canvas.goToPage(0);
+        const QPointF from(420, 320);
+        const auto send = [this](QEvent::Type type, const QPointF &at, Qt::MouseButton button,
+                                 Qt::MouseButtons buttons, quint64 ms) {
+            QMouseEvent event(type, at, at, button, buttons, Qt::NoModifier, stylus());
+            event.setTimestamp(ms);
+            QCoreApplication::sendEvent(&m_canvas, &event);
+        };
+        // Так метку ставит композитор: миллисекунды CLOCK_MONOTONIC, 32 бита.
+        const auto monotonicMs = [] { return quint64(uint32_t(FrameStats::nowNs() / 1'000'000)); };
+
+        send(QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::LeftButton, monotonicMs());
+        send(QEvent::MouseMove, from + QPointF(10, 0), Qt::NoButton, Qt::LeftButton, monotonicMs());
+        QCOMPARE(stats.foreignInputStamps(), 0);
+
+        // Метка минутной давности - не та шкала часов.
+        send(QEvent::MouseMove, from + QPointF(20, 0), Qt::NoButton, Qt::LeftButton,
+             monotonicMs() - 60'000);
+        QCOMPARE(stats.foreignInputStamps(), 1);
+        send(QEvent::MouseButtonRelease, from + QPointF(20, 0), Qt::LeftButton, Qt::NoButton,
+             monotonicMs());
     }
 
     // Сценарий «Неравномерная доставка событий»: те же отсчёты с теми же

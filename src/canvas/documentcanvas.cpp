@@ -1431,8 +1431,10 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
     // а не экрана.
     m_wet.addPoint({surfacePoint(viewPoint), pressure, inputTimeSeconds(timeSeconds)});
 
+    // Латентность - от метки события пера, а не от момента обработки
+    // (ink-beauty-pass, D1); без метки (-1) - от момента обработки.
     if (m_frameStats)
-        m_frameStats->markInput();
+        m_frameStats->markInput(timeSeconds);
     update();
     emit stylusActiveChanged();
     return true;
@@ -1452,8 +1454,10 @@ void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure, qre
 
     m_wet.addPoint({surfacePoint(viewPoint), pressure, inputTimeSeconds(timeSeconds)});
 
+    // Латентность - от метки события пера, а не от момента обработки
+    // (ink-beauty-pass, D1); без метки (-1) - от момента обработки.
     if (m_frameStats)
-        m_frameStats->markInput();
+        m_frameStats->markInput(timeSeconds);
     update();
 }
 
