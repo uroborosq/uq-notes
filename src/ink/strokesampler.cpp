@@ -75,10 +75,15 @@ constexpr int kEndOfStrokeMaxIterations = 20;
 // поэтому потолок - значение библиотеки по умолчанию.
 constexpr int kMaxOutputsPerCall = 100000;
 
-// Давление сглаживается отдельно: модель лишь проецирует его на траекторию, а
-// скачок давления виден ступенькой толщины.
-constexpr qreal kPressureMinCutoff = 2.5;
-constexpr qreal kPressureBeta = 0.01;
+// Давление сглаживается отдельно от траектории: скачок давления виден
+// ступенькой толщины. Срез 12 Гц (τ ≈ 13 мс) вместо прежних 2.5 Гц (τ ≈ 64 мс):
+// с прежним начало штриха оставалось бледным на 36 px, а конец не успевал
+// сойти по спаду нажима (ink-beauty-pass, design.md, D2). beta 0.5 поднимает
+// срез на быстром нажиме: на заходе 0.05 -> 0.65 за 80 мс он около 15 Гц. Шум
+// давления при этом проходит честно; если на устройстве при ровном нажиме
+// видна рябь толщины, minCutoff снижается до 8 Гц - это одна константа.
+constexpr qreal kPressureMinCutoff = 12.0;
+constexpr qreal kPressureBeta = 0.5;
 constexpr qreal kPressureDerivativeCutoff = 10.0;
 
 // Шаг прохода по сплайну в долях шага нарезки: точки нарезки ложатся на
@@ -152,13 +157,18 @@ qreal lerpPressure(const InkPoint &from, const InkPoint &to, qreal u)
 
 StrokeSampler::StrokeSampler()
     : m_modeler(std::make_unique<ism::StrokeModeler>())
-    , m_pressureFilter(kPressureMinCutoff, kPressureBeta, kPressureDerivativeCutoff)
+    , m_pressureFilter(makePressureFilter())
 {
     [[maybe_unused]] const absl::Status status = m_modeler->Reset(modelParams());
     Q_ASSERT_X(status.ok(), "StrokeSampler", "параметры модели штриха не прошли проверку");
 }
 
 StrokeSampler::~StrokeSampler() = default;
+
+OneEuroFilter StrokeSampler::makePressureFilter()
+{
+    return OneEuroFilter(kPressureMinCutoff, kPressureBeta, kPressureDerivativeCutoff);
+}
 
 void StrokeSampler::setSpacing(qreal spacing)
 {
@@ -266,11 +276,19 @@ QList<InkPoint> StrokeSampler::finish()
     // ноль: выход модели во float, и точка, совпавшая с контактом, отстоит от
     // него на ошибку округления. Без порога касание без движения давало бы
     // штрих из двух точек в одном месте.
+    //
+    // Положение конца - сырое, а давление - отфильтрованное, как у всех точек
+    // штриха: сырое давление последнего отсчёта на спаде нажима меньше
+    // отфильтрованного, и толщина на последней точке скакала (на стенде - на
+    // 56%), оставляя «клюв» (ink-beauty-pass, design.md, D2).
+    InkPoint end = m_lastRaw;
+    if (end.hasPressure())
+        end.pressure = m_lastInputPressure;
     InkPoint last = m_points.constLast();
     QList<InkPoint> tail;
-    walkTowards(last, m_lastRaw, tail);
-    if (distance(last.position, m_lastRaw.position) > kEndSnapDistance)
-        tail.append(m_lastRaw);
+    walkTowards(last, end, tail);
+    if (distance(last.position, end.position) > kEndSnapDistance)
+        tail.append(end);
 
     m_points.append(tail);
     added.append(tail);
@@ -304,6 +322,24 @@ QPointF StrokeSampler::rawAt(qreal time) const
     return m_rawHistory.constFirst().position;
 }
 
+qreal StrokeSampler::pressureAt(qreal time) const
+{
+    if (m_rawHistory.isEmpty())
+        return -1.0;
+    if (time >= m_rawHistory.constLast().timeSeconds)
+        return m_rawHistory.constLast().pressure;
+    for (qsizetype i = m_rawHistory.size() - 1; i > 0; --i) {
+        const InkPoint &a = m_rawHistory[i - 1];
+        const InkPoint &b = m_rawHistory[i];
+        if (time >= a.timeSeconds) {
+            const qreal span = b.timeSeconds - a.timeSeconds;
+            const qreal u = span > 0.0 ? (time - a.timeSeconds) / span : 1.0;
+            return a.pressure + (b.pressure - a.pressure) * u;
+        }
+    }
+    return m_rawHistory.constFirst().pressure;
+}
+
 InkPoint StrokeSampler::followedNode(const ism::Result &result, FollowState &state) const
 {
     const qreal time = result.time.Value();
@@ -324,7 +360,10 @@ InkPoint StrokeSampler::followedNode(const ism::Result &result, FollowState &sta
     const QPointF modeled(result.position.x, result.position.y);
     InkPoint node;
     node.position = modeled + (rawAt(time) - modeled) * share;
-    node.pressure = m_lastInputPressure < 0.0 ? -1.0 : qBound(0.0, qreal(result.pressure), 1.0);
+    // Давление - пера в момент узла, а не проекция пружины (см. pressureAt).
+    // Догон на отрыве и предсказание уходят за последний отсчёт и получают
+    // его давление.
+    node.pressure = m_lastInputPressure < 0.0 ? -1.0 : pressureAt(time);
     // Догон на отрыве идёт шагами модели дальше времени последнего отсчёта.
     // Время точки обязано быть временем пера, а не модели.
     node.timeSeconds = qMin(time, m_lastInputTime);

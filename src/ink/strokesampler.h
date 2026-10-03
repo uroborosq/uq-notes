@@ -77,6 +77,11 @@ public:
     const QList<InkPoint> &provisionalPoints() const { return m_provisional; }
     bool isEmpty() const { return m_points.isEmpty(); }
 
+    // Фильтр давления с параметрами сэмплера. Открыт для эталонов
+    // tst_strokesampler: давление точки сверяется с отфильтрованным давлением
+    // пера в момент точки (ink-beauty-pass, design.md, D2).
+    static OneEuroFilter makePressureFilter();
+
 private:
     // Следование за пером на быстром движении. Модель - пружина, и на быстром
     // движении она отстаёт от пера на десяток пикселей: быстрая окружность
@@ -94,6 +99,12 @@ private:
     InkPoint followedNode(const ink::stroke_model::Result &result, FollowState &state) const;
     // Положение пера в момент time по отсчётам: линейно между соседними.
     QPointF rawAt(qreal time) const;
+    // Отфильтрованное давление пера в момент time, линейно между соседними
+    // отсчётами. Давление узла берётся отсюда, по времени узла, а не с
+    // проекции отстающей пружины на ломаную отсчётов: при следовании за пером
+    // положение узла - перо в момент t, а давление пружины примерно на 20 мс
+    // старше, и спад нажима на отрыве терялся (ink-beauty-pass, design.md, D2).
+    qreal pressureAt(qreal time) const;
 
     void appendNode(const ink::stroke_model::Result &result);
     QList<InkPoint> emitSettled(bool toEnd);
@@ -132,8 +143,9 @@ private:
     InkPoint m_lastRaw;
 
     FollowState m_follow;
-    // Последние отсчёты пера для rawAt: экранные единицы, время от начала
-    // штриха. Узлы модели никогда не бывают старше нескольких отсчётов.
+    // Последние отсчёты пера для rawAt и pressureAt: экранные единицы,
+    // отфильтрованное давление, время от начала штриха. Узлы модели никогда не
+    // бывают старше нескольких отсчётов.
     QList<InkPoint> m_rawHistory;
 
     // Выход модели, ещё нужный сплайну: экранные единицы, время от начала

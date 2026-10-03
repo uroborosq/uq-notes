@@ -3,6 +3,8 @@
 
 #include <QTest>
 
+#include <limits>
+
 #include "ink/strokesampler.h"
 #include "support/referencestrokes.h"
 
@@ -34,6 +36,28 @@ private:
         for (const InkPoint &point : sampler.points())
             path.append(point.position);
         return path;
+    }
+
+    // Прямая слева направо со скоростью speed (px/с) на частоте пера целевого
+    // устройства; давление - функция времени от касания. Время событий - не от
+    // нуля, как у настоящего пера.
+    template <typename Pressure>
+    static QList<InkPoint> lineWithPressure(qreal speed, qreal duration, Pressure pressure)
+    {
+        QList<InkPoint> input;
+        const int count = int(std::lround(duration * kDeviceHz));
+        for (int k = 0; k <= count; ++k) {
+            const qreal t = k / kDeviceHz;
+            input.append({QPointF(40.0 + speed * t, 100.0), pressure(t), 3.0 + t});
+        }
+        return input;
+    }
+
+    static void feed(StrokeSampler &sampler, const QList<InkPoint> &input)
+    {
+        for (const InkPoint &point : input)
+            sampler.append(point);
+        sampler.finish();
     }
 
 private slots:
@@ -513,6 +537,110 @@ private slots:
 
         sampler.finish();
         QVERIFY(sampler.provisionalPoints().isEmpty());
+    }
+
+    // --- ink-beauty-pass, D2: давление без запаздывания ---------------------
+
+    // Сценарий «Уверенное начало штриха»: перо ставится и сразу ведёт линию,
+    // нажим за 80 мс растёт от 0.05 до 0.65. Запаздывание - сдвиг по времени,
+    // при котором входное давление лучше всего совпадает с давлением точек
+    // осевой: толщина - функция давления, так что это и запаздывание толщины.
+    void pressureRampLagsAtMost15ms()
+    {
+        const auto pressure = [](qreal t) { return 0.05 + 0.6 * qBound(0.0, t / 0.08, 1.0); };
+        const QList<InkPoint> input = lineWithPressure(300.0, 0.3, pressure);
+        StrokeSampler sampler;
+        feed(sampler, input);
+
+        const qreal origin = input.constFirst().timeSeconds;
+        qreal bestShift = 0.0;
+        qreal bestError = std::numeric_limits<qreal>::max();
+        for (int step = 0; step <= 200; ++step) {
+            const qreal shift = step * 0.0005;
+            qreal error = 0.0;
+            for (const InkPoint &point : sampler.points()) {
+                const qreal t = point.timeSeconds - origin;
+                if (t > 0.15)
+                    break;
+                const qreal expected = pressure(qMax(0.0, t - shift));
+                error += (point.pressure - expected) * (point.pressure - expected);
+            }
+            if (error < bestError) {
+                bestError = error;
+                bestShift = shift;
+            }
+        }
+        QVERIFY2(bestShift <= 0.015,
+                 qPrintable(QStringLiteral("давление отстаёт на %1 мс").arg(bestShift * 1000.0)));
+    }
+
+    // Сценарий «Конец штриха по спаду нажима»: нажим 0.6 плавно спадает до 0.2
+    // за 100 мс перед отрывом. Скачок на последней точке - не больше обычного
+    // шага этого спада с запасом в четверть: 4/с · 4 мс на шаг нарезки (1.2 px
+    // при 300 px/с) = 0.016, порог 0.02. Сырое давление на отрыве при
+    // отфильтрованном у остальных точек даёт скачок 0.25 при прежнем фильтре
+    // (на стенде - 56% толщины) и 0.044 даже при новом: он отстаёт от пера на
+    // свои 11 мс, а сырое - нет.
+    void strokeEndFollowsFallingPressureWithoutJump()
+    {
+        const auto pressure = [](qreal t) {
+            return t < 0.2 ? 0.6 : 0.6 - 0.4 * qMin(1.0, (t - 0.2) / 0.1);
+        };
+        StrokeSampler sampler;
+        feed(sampler, lineWithPressure(300.0, 0.3, pressure));
+
+        const QList<InkPoint> &points = sampler.points();
+        QVERIFY(points.size() > 10);
+        const qreal last = points.constLast().pressure;
+        const qreal previous = points[points.size() - 2].pressure;
+        QVERIFY2(qAbs(last - previous) <= 0.02,
+                 qPrintable(QStringLiteral("скачок давления на последней точке: %1 -> %2")
+                                .arg(previous)
+                                .arg(last)));
+        // И линия сошла вслед за нажимом, а не осталась толстой: на отрыве
+        // давление 0.2, отставание на 15 мс при спаде 4/с - ещё 0.06.
+        QVERIFY2(previous <= 0.2 + 0.06 + 0.01,
+                 qPrintable(QStringLiteral("к отрыву давление осталось %1").arg(previous)));
+    }
+
+    // Давление точки - давление пера в момент этой точки, а не проекция
+    // отстающей пружины модели. На быстрой прямой положение узла - перо в момент
+    // узла, и давление обязано быть оттуда же: это отфильтрованное давление
+    // входа, линейно по времени между отсчётами. Последняя точка - тоже.
+    void pointPressureIsPenPressureAtPointTime()
+    {
+        const QList<InkPoint> input =
+            lineWithPressure(600.0, 0.3, [](qreal t) { return 0.2 + 2.0 * t; });
+        StrokeSampler sampler;
+        feed(sampler, input);
+
+        OneEuroFilter filter = StrokeSampler::makePressureFilter();
+        const qreal origin = input.constFirst().timeSeconds;
+        QList<qreal> filtered;
+        for (const InkPoint &point : input)
+            filtered.append(qBound(0.0, filter.filter(point.pressure, point.timeSeconds - origin), 1.0));
+        const auto filteredAt = [&](qreal time) {
+            if (time <= input.constFirst().timeSeconds)
+                return filtered.constFirst();
+            for (int i = 1; i < input.size(); ++i) {
+                if (time <= input[i].timeSeconds) {
+                    const qreal u = (time - input[i - 1].timeSeconds)
+                        / (input[i].timeSeconds - input[i - 1].timeSeconds);
+                    return filtered[i - 1] + (filtered[i] - filtered[i - 1]) * u;
+                }
+            }
+            return filtered.constLast();
+        };
+
+        for (int i = 0; i < sampler.points().size(); ++i) {
+            const InkPoint &point = sampler.points()[i];
+            const qreal expected = filteredAt(point.timeSeconds);
+            QVERIFY2(qAbs(point.pressure - expected) < 2e-3,
+                     qPrintable(QStringLiteral("точка %1: давление %2, у пера в её момент %3")
+                                    .arg(i)
+                                    .arg(point.pressure)
+                                    .arg(expected)));
+        }
     }
 
     void resetClearsEverything()
