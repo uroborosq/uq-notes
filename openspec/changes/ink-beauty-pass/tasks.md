@@ -3682,14 +3682,14 @@ include-ом.
   EOF
   ```
 
-- [ ] 5.9 **Тесты шага целиком (гейт D9 по тестам).**
+- [x] 5.9 **Тесты шага целиком (гейт D9 по тестам).**
   `cmake --build build -j$(nproc) && ctest --test-dir build --output-on-failure`
   Ожидается `100% tests passed` (`tst_idleframes` без сессии - SKIP). Отдельно
   убедиться, что `tst_strokesampler`, `tst_wetstroke`, `tst_notestore` в
   списке пройденных. При провале - не поднимать версию, вернуться к группе,
   чей тест упал.
 
-- [ ] 5.10 **Версия 0.8.0.** `CMakeLists.txt`, строка 2:
+- [x] 5.10 **Версия 0.8.0.** `CMakeLists.txt`, строка 2:
   `project(uq-notes VERSION 0.7.0 LANGUAGES CXX)` →
   `project(uq-notes VERSION 0.8.0 LANGUAGES CXX)`.
   `packaging/PKGBUILD`, строка 9: `pkgver=0.7.0` → `pkgver=0.8.0` (`pkgrel=1`
@@ -3697,7 +3697,7 @@ include-ом.
   ничего не находит; `cmake -S . -B build >/dev/null && grep -m1 CMAKE_PROJECT_VERSION:STATIC build/CMakeCache.txt`
   показывает `0.8.0`.
 
-- [ ] 5.11 **Финальный коммит шага прозой.** Числа в тексте сверить с выводом
+- [x] 5.11 **Финальный коммит шага прозой.** Числа в тексте сверить с выводом
   5.5, 5.6 и 3.7; если на машине исполнителя CPU отличается, поправить только
   его.
 
