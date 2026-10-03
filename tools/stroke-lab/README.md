@@ -315,20 +315,20 @@ truth/<sample>_s<scale>.png    эталон 1:1
 | `exp/apps-survey` | `--endcheck`, `width_*_err_px`, `width_step_max_px`, `width_body_cv`, толщина в `settled_mutations` |
 | `exp/latency` | эмуляция кадров `frame_*`, лента мокрых кадров |
 | `exp/dry-refine` | `width_err_*`, `width_touch/lift_ratio` (в ветке - `width_start/end_ratio`), `width_end_jump_*`, `pressure_lag_ms`, `stroke-lab-aabench` |
-| `exp/antialias` | `rastermetrics.cpp`, `aaraster.*`, `SamplePattern::lattice64` |
+| `exp/antialias` | `rastermetrics.cpp`, `aaraster.*`, `SamplePattern::lattice64`; в шаге 3 - варианты `aa-fringe*` и `aa-gpu-bench` |
 
 Варианты прототипов остаются в своих ветках; шаг изменения, который берёт
 решение, приносит с собой и его вариант (`git show exp/<ветка>:tools/stroke-lab/variants/<файл>`).
 GPU-замер `aa-gpu-bench` (`exp/antialias`, `gpu/`) рисует полосой варианта
-`aa-fringe`, поэтому переносится вместе с ним в шаге 3.
+`aa-fringe`, поэтому перенесён вместе с ним в шаге 3.
 
 ## Как добавить вариант
 
 1. Создайте `variants/<имя>.cpp`. Чтобы менять конвейер приложения,
    наследуйтесь от `lab::AppPipeline` (`variants/app_pipeline.h`) и
    переопределите нужные методы, как `baseline.cpp` и `step1_pressure.cpp`
-   (закон толщины - аргумент конструктора; `m_wet`, `m_final` и `toCenter`
-   доступны наследнику). Копировать `AppPipeline` в вариант можно только под
+   (закон толщины - аргумент конструктора; `m_wet`, `m_final`, `toCenter` и
+   `halfWidthAt` доступны наследнику). Копировать `AppPipeline` в вариант можно только под
    новым именем в анонимном пространстве имён: второе, другое определение
    `lab::AppPipeline` нарушает ODR, и линкер молча возьмёт одно из двух - то,
    что раньше в порядке сборки, - для всех вариантов сразу.
@@ -393,3 +393,29 @@ python3 tools/stroke-lab/gate_d6.py /tmp/uq-gate-d6
 приложением. Ложные острия - `false_cusp_count`, острие без стоянки пера -
 `corner_N_nostop_240/481`, зубец короче кадра - `tooth_240`
 (`tooth_peak_ratio`). На шаге 2 ink-beauty-pass гейт не пройден (design.md, D6).
+
+## Шаг 3 ink-beauty-pass: сглаживание бахромой
+
+`variants/aa_fringe.cpp` (из `exp/antialias`, на `lab::AppPipeline` с законом
+Tapered): траектория и окончательные точки - как у `baseline`, меняется только
+растеризация - полоса с бахромой 1 px и точным покрытием боксом поперёк штриха,
+эмуляция одной выборки на пиксель без MSAA (`aaraster.h`). `aa-fringe` - то, что
+переносится в приложение (D7); `aa-fringe-max`, `aa-fringe-nofloor`,
+`aa-fringe-naive`, `aa-fringe-hairline` - для сравнения. `aa-gpu-bench` рисует
+ту же полосу на настоящем GPU (QRhi) и сверяет с эмуляцией:
+
+    QT_QPA_PLATFORM=wayland ./build/tools/stroke-lab/aa-gpu-bench --out /tmp/aa-gpu --frames 5
+
+Собирается, только если есть Qt ShaderTools и приватные заголовки QtGui.
+
+`aa-fringe-rho` - как `aa-fringe`, но вынос внутренней вершины стыка ограничен радиусом
+кривизны осевой `max(L₋, L₊) / (2·sin(|θ|/2))` (D7). Множитель радиуса для разбора -
+переменная `AA_RHO_FACTOR` (по умолчанию 1). Гейт шага 3:
+
+    tools/stroke-lab/gate-rho.sh /tmp/gate-rho
+
+Он гоняет baseline, aa-fringe и aa-fringe-rho при dpr 1.75 и 2, перьях 1, 2.6 и 4.5 pt и
+масштабах 1 и 2.5 на тугих петлях (`small_e_10`, `small_o_8`, `word_minimum_small`) и
+остриях. Критерии: на петлях `raster_vs_ideal_p99` не хуже baseline, кроме сочетаний
+«перо толще петли» (толщина пера на экране ≥ 0.4 x-height) и p99 = 1 у baseline; везде
+не хуже aa-fringe с допуском 3/255.

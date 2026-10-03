@@ -95,6 +95,13 @@ protected:
         return {p.position, 2.0 * tessellator.halfWidthAt(p), p.pressure, p.timeSeconds};
     }
 
+    // Полуширина по закону штриха - для вариантов, которые строят свою полосу
+    // на тех же окончательных точках (aa_fringe.cpp).
+    qreal halfWidthAt(const InkPoint &p) const
+    {
+        return const_cast<WetStroke &>(m_wet).tessellator().halfWidthAt(p);
+    }
+
     StrokeStyle m_style;
     WetStroke m_wet;
     Stroke m_final;

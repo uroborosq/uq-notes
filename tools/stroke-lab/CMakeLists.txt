@@ -58,3 +58,31 @@ add_executable(stroke-lab-aabench aabench.cpp raster.cpp)
 target_include_directories(stroke-lab-aabench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(stroke-lab-aabench PRIVATE Qt6::Core Qt6::Gui)
 set_target_properties(stroke-lab-aabench PROPERTIES AUTOMOC OFF)
+
+# aa-gpu-bench: та же геометрия на настоящем GPU (QRhi/Vulkan) - проверка
+# эмуляции сглаживания и цена кадра MSAA 4x против бахромы (gpu/bench.cpp).
+# Собирается, только если есть Qt ShaderTools и приватные заголовки QtGui (rhi).
+find_package(Qt6 QUIET COMPONENTS ShaderTools GuiPrivate)
+if(TARGET Qt6::ShaderTools AND TARGET Qt6::GuiPrivate)
+    add_executable(aa-gpu-bench
+        gpu/bench.cpp
+        corpus.cpp
+        metrics.cpp
+        raster.cpp
+        aaraster.cpp
+        rastermetrics.cpp
+        render.cpp
+        ${STROKE_LAB_VARIANTS}
+    )
+    target_include_directories(aa-gpu-bench PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${UQ_SOURCE_ROOT}/tests
+    )
+    target_link_libraries(aa-gpu-bench PRIVATE stroke_lab_ink Qt6::Core Qt6::Gui Qt6::GuiPrivate)
+    set_target_properties(aa-gpu-bench PROPERTIES AUTOMOC OFF)
+    qt_add_shaders(aa-gpu-bench "aa_gpu_shaders"
+        PREFIX "/shaders"
+        BASE gpu
+        FILES gpu/ink.vert gpu/ink.frag gpu/flat.vert gpu/flat.frag
+    )
+endif()

@@ -6951,7 +6951,7 @@ ctest --test-dir build -R <tst_name> --output-on-failure
 - Modify: `tools/stroke-lab/README.md`
 - Modify: `openspec/changes/ink-beauty-pass/design.md` (D7, Risks - результат гейта)
 
-- [ ] 10.1 **Перенести в стенд варианты D7 и GPU-замер из `exp/antialias`**
+- [x] 10.1 **Перенести в стенд варианты D7 и GPU-замер из `exp/antialias`**
 
 Шаг 0 приносит движок (`aaraster.{h,cpp}`, `rastermetrics`, хук `Variant::rasterize`,
 метрику `raster_vs_ideal`), а варианты D7 и `aa-gpu-bench` по его таблице 1.20 переносит
@@ -6979,7 +6979,7 @@ cmake --build build -j$(nproc) --target stroke-lab aa-gpu-bench
 `QT_QPA_PLATFORM=wayland ./build/tools/stroke-lab/aa-gpu-bench --out /tmp/aa-gpu --frames 5`
 - первая строка `GPU: ...`, в столбце fringe GPU↔emu max 1 уровень на масштабе 1.
 
-- [ ] 10.2 **Снять контрольный прогон aa-fringe до правки** (правка не должна менять вариант без предела)
+- [x] 10.2 **Снять контрольный прогон aa-fringe до правки** (правка не должна менять вариант без предела)
 
 ```
 ./build/tools/stroke-lab/stroke-lab --variants aa-fringe --samples corner_M,small_e_10 \
@@ -6988,7 +6988,7 @@ cmake --build build -j$(nproc) --target stroke-lab aa-gpu-bench
 
 Ожидаемо: `/tmp/rho-before/aa-fringe/metrics.json` с двумя записями.
 
-- [ ] 10.3 **aa_fringe.cpp: поле предела в `AxisVertex` стенда**
+- [x] 10.3 **aa_fringe.cpp: поле предела в `AxisVertex` стенда**
 
 В начало файла, к остальным `#include`, добавить `#include <limits>`. Структуру
 `AxisVertex` в анонимном пространстве имён заменить целиком:
@@ -7007,7 +7007,7 @@ struct AxisVertex
 };
 ```
 
-- [ ] 10.4 **aa_fringe.cpp: `AxisTessellator` получает режим предела и длины сегментов**
+- [x] 10.4 **aa_fringe.cpp: `AxisTessellator` получает режим предела и длины сегментов**
 
 Конструктор `AxisTessellator` заменить:
 
@@ -7040,7 +7040,7 @@ struct AxisVertex
     qreal m_radiusFactor = 1.0;
 ```
 
-- [ ] 10.5 **aa_fringe.cpp: `joint()` ставит предел внутренней вершине**
+- [x] 10.5 **aa_fringe.cpp: `joint()` ставит предел внутренней вершине**
 
 Сигнатуру `joint` заменить, начало тела дополнить расчётом радиуса:
 
@@ -7085,7 +7085,7 @@ struct AxisVertex
             I.radius = radius;
 ```
 
-- [ ] 10.6 **aa_fringe.cpp: `FringeVariant` - параметр предела и вынос с пределом в `rasterize()`**
+- [x] 10.6 **aa_fringe.cpp: `FringeVariant` - параметр предела и вынос с пределом в `rasterize()`**
 
 Конструктор `FringeVariant` заменить:
 
@@ -7141,7 +7141,7 @@ struct AxisVertex
 
 (`m_blend`, `m_profile`, `m_minHw`, `m_exactJoins` уже есть.)
 
-- [ ] 10.7 **aa_fringe.cpp: зарегистрировать вариант `aa-fringe-rho`**
+- [x] 10.7 **aa_fringe.cpp: зарегистрировать вариант `aa-fringe-rho`**
 
 После `class FringeHairline ... };` добавить:
 
@@ -7162,7 +7162,7 @@ STROKE_LAB_VARIANT(FringeRho, "aa-fringe-rho",
                    "тугих петлях (design.md, D7)");
 ```
 
-- [ ] 10.8 **Собрать стенд и убедиться, что aa-fringe не изменился**
+- [x] 10.8 **Собрать стенд и убедиться, что aa-fringe не изменился**
 
 ```
 cmake --build build -j$(nproc) --target stroke-lab
@@ -7183,7 +7183,7 @@ EOF
 (растровые метрики совпадают до бита: путь без предела не тронут). На копии так и
 вышло: 15 растровых ключей совпали.
 
-- [ ] 10.9 **Создать `tools/stroke-lab/gate-rho.sh`**
+- [x] 10.9 **Создать `tools/stroke-lab/gate-rho.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -7274,7 +7274,7 @@ EOF
 chmod +x tools/stroke-lab/gate-rho.sh
 ```
 
-- [ ] 10.10 **Прогнать гейт**
+- [x] 10.10 **Прогнать гейт**
 
 ```
 tools/stroke-lab/gate-rho.sh /tmp/gate-rho | tee /tmp/gate-rho.txt
@@ -7303,7 +7303,7 @@ tools/stroke-lab/gate-rho.sh /tmp/gate-rho | tee /tmp/gate-rho.txt
 Если при исполнении строка B превышает 3/255 или появляется строка A - это провал
 (10.12), допуск не расширять.
 
-- [ ] 10.11 **Посмотреть складку глазами**
+- [x] 10.11 **Посмотреть складку глазами**
 
 Открыть рядом `/tmp/gate-rho/dpr2_w1/aa-fringe/png/` и `/tmp/gate-rho/dpr2_w1/aa-fringe-rho/png/`:
 снимки `small_e_10` при масштабе 1 и их `_ideal`, а также увеличения из `crops/`. Тот же
@@ -7311,7 +7311,7 @@ tools/stroke-lab/gate-rho.sh /tmp/gate-rho | tee /tmp/gate-rho.txt
 Критерий: петля «e» у `aa-fringe-rho` не бледнее и не залита сильнее, чем `_ideal`; на
 `corner_M` и `corner_N` вершина острия не стала тупее, чем у `aa-fringe`.
 
-- [ ] 10.12 **Действие при провале гейта**
+- [x] 10.12 **Действие при провале гейта**
 
 Если 10.10 печатает `ГЕЙТ НЕ ПРОЙДЕН` (код 1) или 10.11 показывает складку:
 - группы 11-14 не начинать, кода в `src/` не писать;
@@ -7324,7 +7324,7 @@ tools/stroke-lab/gate-rho.sh /tmp/gate-rho | tee /tmp/gate-rho.txt
   можно закоммитить как исследовательский (`Стенд: вариант aa-fringe-rho`), но абзац D7
   в design.md тогда вернуть к «не проверено».
 
-- [ ] 10.13 **При проходе сверить результат с design.md**
+- [x] 10.13 **При проходе сверить результат с design.md**
 
 В `openspec/changes/ink-beauty-pass/design.md`, D7, в пункте «Внутренний вынос ограничен
 радиусом кривизны» уже стоит абзац о результате гейта и принятой цене (вписан по решению
@@ -7363,7 +7363,7 @@ dpr 1.75, перо 1 pt, масштаб 2.5) и `small_o_8` 0.683 → 0.687 (1/2
   штриха (`outline-sdf`): нужен слой «один раз на штрих» и вдвое больше вершин.
 ```
 
-- [ ] 10.14 **Дописать стенд в README**
+- [x] 10.14 **Дописать стенд в README**
 
 В `tools/stroke-lab/README.md`, в конец раздела о вариантах сглаживания, добавить:
 
@@ -7381,7 +7381,7 @@ dpr 1.75, перо 1 pt, масштаб 2.5) и `small_o_8` 0.683 → 0.687 (1/2
 не хуже aa-fringe с допуском 3/255.
 ```
 
-- [ ] 10.15 **Коммит**
+- [x] 10.15 **Коммит**
 
 ```
 git add tools/stroke-lab/variants/aa_fringe.cpp tools/stroke-lab/variants/aa_fringe.h \
