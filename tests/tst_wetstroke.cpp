@@ -4,6 +4,7 @@
 
 #include <QElapsedTimer>
 #include <QLineF>
+#include <QPolygonF>
 #include <QTest>
 
 #include "ink/stroketessellator.h"
@@ -28,6 +29,16 @@ QPointF endCapCenter(const QVector<WetStroke::Vertex> &strip)
 {
     const int i = int(strip.size()) - kCapVertices;
     return (toPoint(strip[i]) + toPoint(strip[i + 1])) / 2.0;
+}
+
+qreal distanceToSegment(const QPointF &p, const QLineF &segment)
+{
+    const QPointF ab = segment.p2() - segment.p1();
+    const qreal lengthSquared = QPointF::dotProduct(ab, ab);
+    const qreal t = lengthSquared < 1e-12
+        ? 0.0
+        : qBound(0.0, QPointF::dotProduct(p - segment.p1(), ab) / lengthSquared, 1.0);
+    return QLineF(p, segment.p1() + ab * t).length();
 }
 
 bool sameStrip(const QVector<WetStroke::Vertex> &a, const QVector<WetStroke::Vertex> &b)
@@ -154,13 +165,152 @@ private slots:
         QVERIFY(stroke.isValid());
     }
 
-    void singleTapProducesNoStroke()
+    // --- ink-beauty-pass, D5: точка от касания --------------------------------
+
+    // Сценарий «Точка над буквой»: касание без движения оставляет точку, и
+    // видна она уже во время касания, а не только после отрыва.
+    void tapWithoutMovementGivesDot()
     {
         WetStroke wet;
         wet.begin(0, prototype());
-        wet.addPoint({QPointF(10, 10), 0.5, 0.0});
+        const QPointF at(10, 10);
+        wet.addPoint({at, 0.5, 0.0});
+
+        // Мокрый диск под пером.
+        QCOMPARE(wet.strip().size(), 2 * kCapVertices);
+        const qreal r = wet.tessellator().halfWidthAt({at, 0.5, 0.0});
+        for (const WetStroke::Vertex &vertex : wet.strip())
+            QVERIFY(qAbs(QLineF(toPoint(vertex), at).length() - r) < 1e-4);
+
+        wet.addPoint({at, 0.7, 0.04});
         const Stroke stroke = wet.finish();
-        QVERIFY(!stroke.isValid());
+        QVERIFY(stroke.isValid());
+        QCOMPARE(stroke.points.size(), 2);
+        QCOMPARE(stroke.points[0].position, at);
+        QCOMPARE(stroke.points[1].position, at);
+        // Толщина точки - по самому сильному отфильтрованному нажиму касания.
+        QVERIFY(stroke.points[1].pressure > 0.5);
+
+        // Мокрая полоса на отрыве - та же, что сухая.
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        QVERIFY(sameStrip(wet.strip(), tessellator.tessellate(stroke.points)));
+    }
+
+    // Сценарий «Случайный задев»: короче 30 мс и легче 0.05 - следа нет.
+    // Достаточно одного из двух - долгого касания или нажима, - и точка
+    // остаётся. У мыши давления нет, её касание не отбрасывается.
+    void onlyShortLightTouchIsDiscarded_data()
+    {
+        QTest::addColumn<qreal>("pressure");
+        QTest::addColumn<qreal>("duration");
+        QTest::addColumn<bool>("kept");
+        QTest::newRow("задев") << 0.03 << 0.01 << false;
+        QTest::newRow("короткое с нажимом") << 0.5 << 0.01 << true;
+        QTest::newRow("долгое лёгкое") << 0.03 << 0.05 << true;
+        QTest::newRow("мышь") << -1.0 << 0.01 << true;
+    }
+
+    void onlyShortLightTouchIsDiscarded()
+    {
+        QFETCH(qreal, pressure);
+        QFETCH(qreal, duration);
+        QFETCH(bool, kept);
+
+        WetStroke wet;
+        wet.begin(0, prototype());
+        for (qreal t = 0.0; t <= duration + 1e-9; t += 0.005)
+            wet.addPoint({QPointF(10, 10), pressure, t});
+        const Stroke stroke = wet.finish();
+        QCOMPARE(stroke.isValid(), kept);
+        if (!kept)
+            QVERIFY(wet.strip().isEmpty());
+    }
+
+    // Сценарий «Касание с едва заметным сдвигом»: перо сдвинулось на 0.5 при
+    // толщине 3 - капсула одной толщины, а не чёрточка с тонким заходом.
+    void tinyMovementGivesCapsule()
+    {
+        WetStroke wet;
+        wet.begin(0, prototype(3.0));
+        const qreal pressures[] = {0.2, 0.5, 0.8, 0.8, 0.7, 0.6, 0.5};
+        for (int i = 0; i < 7; ++i)
+            wet.addPoint({QPointF(10.0 + 0.5 * i / 6.0, 10.0), pressures[i], i / 200.0});
+        const Stroke stroke = wet.finish();
+        QVERIFY(stroke.isValid());
+
+        // Радиус капсулы - наибольшая полуширина среди точек штриха.
+        qreal r = 0.0;
+        for (const InkPoint &point : stroke.points)
+            r = qMax(r, wet.tessellator().halfWidthAt(point));
+        const QLineF axis(stroke.points.constFirst().position, stroke.points.constLast().position);
+        for (const WetStroke::Vertex &vertex : wet.strip()) {
+            const qreal d = distanceToSegment(toPoint(vertex), axis);
+            QVERIFY2(qAbs(d - r) < 1e-4,
+                     qPrintable(QStringLiteral("вершина в %1 от оси, радиус капсулы %2").arg(d).arg(r)));
+        }
+
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        QVERIFY(sameStrip(wet.strip(), tessellator.tessellate(stroke.points)));
+    }
+
+    // Сценарий «Касание с едва заметным сдвигом» при живом нажиме: касание
+    // начинается и кончается почти без давления, а точка обязана быть толщиной
+    // в нажим касания - по его пику, и во время касания, и после отрыва.
+    void shiftedTapHasPeakWidth_data()
+    {
+        QTest::addColumn<qreal>("shift");
+        QTest::newRow("0.3") << 0.3;
+        QTest::newRow("1.5") << 1.5;
+        QTest::newRow("3.0") << 3.0;
+    }
+
+    void shiftedTapHasPeakWidth()
+    {
+        QFETCH(qreal, shift);
+        // Толщина 4 - все сдвиги короче её; касание 40 мс на частоте пера.
+        const qreal width = 4.0;
+        QList<InkPoint> input;
+        for (int k = 0; k <= 19; ++k) {
+            const qreal u = k / 19.0;
+            input.append({QPointF(10.0 + shift * u, 10.0), 0.05 + 0.55 * std::sin(M_PI * u),
+                          k / 481.0});
+        }
+        StrokeSampler reference;
+        for (const InkPoint &point : input)
+            reference.append(point);
+        const qreal peak = reference.peakPressure();
+
+        WetStroke wet;
+        wet.begin(0, prototype(width));
+        for (const InkPoint &point : input)
+            wet.addPoint(point);
+        const qreal r = wet.tessellator().halfWidthAt({QPointF(), peak, 0.0});
+        // Во время касания: мокрая капсула уже толщиной по пику.
+        QPolygonF during;
+        for (const WetStroke::Vertex &vertex : wet.strip())
+            during.append(toPoint(vertex));
+        QVERIFY2(qAbs(during.boundingRect().height() - 2.0 * r) <= 0.05 * 2.0 * r,
+                 qPrintable(QStringLiteral("мокрая точка высотой %1, ждали %2")
+                                .arg(during.boundingRect().height()).arg(2.0 * r)));
+
+        const Stroke stroke = wet.finish();
+        QVERIFY(stroke.isValid());
+        // После отрыва: последняя точка - с пиком нажима, капсула - его толщины.
+        QCOMPARE(stroke.points.constLast().pressure, peak);
+        const QLineF axis(stroke.points.constFirst().position, stroke.points.constLast().position);
+        for (const WetStroke::Vertex &vertex : wet.strip()) {
+            const qreal d = distanceToSegment(toPoint(vertex), axis);
+            QVERIFY2(qAbs(d - r) <= 0.05 * r,
+                     qPrintable(QStringLiteral("вершина в %1 от оси, радиус по пику %2").arg(d).arg(r)));
+        }
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        QVERIFY(sameStrip(wet.strip(), tessellator.tessellate(stroke.points)));
     }
 
     // --- rnote-grade-stroke-fidelity, задача 5.2 --------------------------
@@ -248,7 +398,9 @@ private slots:
     // ink-beauty-pass, D4: пока хорда для начального торца не известна, вся
     // полоса провизорная; как только она известна, начальный торец ложится в
     // окончательную часть и больше не переписывается. На этом переходе держится
-    // загрузчик кусков холста: окончательная часть только растёт.
+    // загрузчик кусков холста: окончательная часть только растёт. С D5 торец
+    // окончателен, когда известна хорда и окончательная осевая не короче
+    // толщины пера: до того штрих ещё может оказаться точкой.
     void startCapSettlesOnceAndKeepsPrefix()
     {
         const qreal width = 6.0;
@@ -280,11 +432,22 @@ private slots:
             if (transition < 0) {
                 if (added == 0) {
                     QCOMPARE(settled, 0);
-                    // Пока торец провизорный, ни одна окончательная точка не
-                    // отошла на радиус.
-                    for (const InkPoint &point : wet.points())
-                        QVERIFY(QLineF(point.position, wet.points().constFirst().position).length()
-                                < radius);
+                    // Пока торец провизорный, либо ни одна окончательная точка
+                    // не отошла на радиус, либо окончательная осевая ещё короче
+                    // толщины пера и штрих может оказаться точкой (D5).
+                    qreal arc = 0.0;
+                    bool withinRadius = true;
+                    const QList<InkPoint> &settledPoints = wet.points();
+                    for (int k = 0; k < settledPoints.size(); ++k) {
+                        if (k > 0)
+                            arc += QLineF(settledPoints[k - 1].position,
+                                          settledPoints[k].position).length();
+                        withinRadius = withinRadius
+                            && QLineF(settledPoints[k].position,
+                                      settledPoints.constFirst().position).length()
+                                < radius;
+                    }
+                    QVERIFY(withinRadius || arc < width);
                     settledPointsBefore = int(wet.points().size());
                     previousSettled = settled;
                     continue;

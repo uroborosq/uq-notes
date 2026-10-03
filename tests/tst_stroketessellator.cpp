@@ -98,6 +98,11 @@ QRectF boundsOf(const QVector<Vertex> &strip)
     return polygon.boundingRect();
 }
 
+qreal distanceToSegment(const QPointF &p, const QPointF &a, const QPointF &b)
+{
+    return distanceToPolyline(p, {{a, 0.5, 0.0}, {b, 0.5, 0.0}});
+}
+
 } // namespace
 
 class TestStrokeTessellator : public QObject
@@ -476,6 +481,43 @@ private slots:
         const qreal area = polygonArea(tessellator.outline(points));
         QVERIFY2(qAbs(area - M_PI * r * r) <= 0.02 * M_PI * r * r,
                  qPrintable(QStringLiteral("площадь %1, круг %2").arg(area).arg(M_PI * r * r)));
+    }
+
+    // --- ink-beauty-pass, D5: точка от касания --------------------------------
+
+    // Сценарий «Касание с едва заметным сдвигом»: осевая короче толщины пера -
+    // капсула с наибольшей полушириной, а не чёрточка. Штрих длиннее толщины -
+    // обычный, торцы по своим полуширинам.
+    void strokeShorterThanPenWidthIsCapsule()
+    {
+        StrokeTessellator tessellator;
+        tessellator.setWidth(3.0);
+
+        const QList<InkPoint> tap = {{QPointF(10.0, 10.0), 0.2, 0.0},
+                                     {QPointF(10.5, 10.0), 0.9, 0.01},
+                                     {QPointF(11.0, 10.0), 0.3, 0.02}};
+        const qreal r = tessellator.halfWidthAt(tap[1]);
+        const QVector<Vertex> strip = tessellator.tessellate(tap);
+        QVERIFY(!StrokeTessellator::isDegenerate(strip));
+        for (const Vertex &vertex : strip) {
+            const qreal d = distanceToSegment(toPoint(vertex), tap.constFirst().position,
+                                              tap.constLast().position);
+            QVERIFY2(qAbs(d - r) < 1e-4,
+                     qPrintable(QStringLiteral("вершина в %1 от оси капсулы, радиус %2")
+                                    .arg(d).arg(r)));
+        }
+        const QRectF bounds = boundsOf(strip);
+        QVERIFY(qAbs(bounds.width() - (1.0 + 2.0 * r)) < 1e-4);
+        QVERIFY(qAbs(bounds.height() - 2.0 * r) < 1e-4);
+
+        // Осевая 4.5 при толщине 3 - уже не точка: начальный торец по своей
+        // полуширине, а не по наибольшей.
+        const QList<InkPoint> line = {{QPointF(10.0, 10.0), 0.2, 0.0},
+                                      {QPointF(12.25, 10.0), 0.9, 0.01},
+                                      {QPointF(14.5, 10.0), 0.3, 0.02}};
+        const QVector<Vertex> longer = tessellator.tessellate(line);
+        const qreal r0 = tessellator.halfWidthAt(line.constFirst());
+        QVERIFY(QLineF(toPoint(longer.constFirst()), QPointF(10.0 - r0, 10.0)).length() < 1e-4);
     }
 
     void degenerateInputIsHandled()

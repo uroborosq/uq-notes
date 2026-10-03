@@ -367,6 +367,48 @@ private slots:
         QCOMPARE(ink->strokeCount(), 0);
     }
 
+    // ink-beauty-pass, D5, сценарий «Касание элемента окна пером»: касание
+    // пером кнопки, значка вкладыша или пункта оглавления срабатывает на
+    // элементе, а точки на странице не оставляет - без режима и в режиме
+    // «Только перо». Контроль: то же касание по странице точку оставляет,
+    // значит, точек не было потому, что касание забрал элемент.
+    void penTapsOnControlsLeaveNoDot()
+    {
+        InkDocument *ink = m_canvas->ink();
+        QVERIFY(ink);
+        const quint64 insert = ink->addInsert(0, QRectF(120, 160, 200, 140));
+        ink->setInsertOpen(insert, false);
+        QCoreApplication::processEvents();
+
+        QQuickItem *toggle = button(QStringLiteral("penOnlyButton"));
+        QQuickItem *anchor = button(QStringLiteral("insertAnchor"));
+        QVERIFY(toggle);
+        QVERIFY(anchor);
+        QQuickItem *conclusion = nullptr;
+        QTRY_VERIFY((conclusion = findVisibleText(m_window->contentItem(),
+                                                  QStringLiteral("4 Conclusion"))));
+        QCOMPARE(m_canvas->tool(), DocumentCanvas::Tool::Pen);
+
+        // Без режима: кнопка панели.
+        penClick(m_window, centerOf(toggle));
+        QVERIFY(m_guard->penOnly());
+        QCOMPARE(ink->strokeCount(), 0);
+
+        // В режиме: значок вкладыша и пункт оглавления.
+        penClick(m_window, centerOf(anchor));
+        QVERIFY(ink->insertById(insert).open);
+        QCOMPARE(ink->strokeCount(), 0);
+        penClick(m_window, centerOf(conclusion));
+        QTRY_COMPARE(m_canvas->currentPage(), 12);
+        QCOMPARE(ink->strokeCount(), 0);
+
+        // Контроль: касание страницы тем же пером - точка.
+        settle();
+        QVERIFY(m_canvas->pageAtView(m_canvas->mapFromScene(canvasCenter())) >= 0);
+        penClick(m_window, canvasCenter());
+        QCOMPARE(ink->strokeCount(), 1);
+    }
+
     // Сценарий «Касание кнопки при ладони на странице»: вторая точка той же
     // последовательности касаний отклоняется, а ладонь остаётся навигацией.
     void fingerTapWhilePalmRestsOnPage()

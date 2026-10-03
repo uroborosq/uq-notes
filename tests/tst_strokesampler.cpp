@@ -668,6 +668,36 @@ private slots:
         }
     }
 
+    // ink-beauty-pass, D5: касанию нужны длительность по меткам отсчётов и
+    // наибольшее отфильтрованное давление - по ним WetStroke отбрасывает
+    // задев и даёт точке толщину. Сам сэмплер точку не дописывает: касание без
+    // движения у него - одна точка.
+    void tapReportsDurationAndPeakPressure()
+    {
+        StrokeSampler sampler;
+        const QPointF at(30, 40);
+        sampler.append({at, 0.2, 1.000});
+        sampler.append({at, 0.6, 1.010});
+        sampler.append({at, 0.4, 1.020});
+        QVERIFY(qAbs(sampler.contactDuration() - 0.020) < 1e-9);
+        const qreal peak = sampler.peakPressure();
+        QVERIFY2(peak > 0.2 && peak <= 0.6, qPrintable(QStringLiteral("пик %1").arg(peak)));
+        for (const InkPoint &point : sampler.points())
+            QVERIFY(point.pressure <= peak + 1e-12);
+
+        sampler.finish();
+        QCOMPARE(sampler.points().size(), 1);
+        QCOMPARE(sampler.points()[0].position, at);
+        QCOMPARE(sampler.peakPressure(), peak);
+
+        // Без давления пика нет.
+        StrokeSampler mouse;
+        mouse.append({at, -1.0, 2.0});
+        mouse.finish();
+        QCOMPARE(mouse.peakPressure(), -1.0);
+        QCOMPARE(mouse.contactDuration(), 0.0);
+    }
+
     void resetClearsEverything()
     {
         StrokeSampler sampler;

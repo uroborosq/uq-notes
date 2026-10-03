@@ -3,6 +3,7 @@
 // давления. Сценарии из specs/ink-input/spec.md.
 
 #include <QMouseEvent>
+#include <QLineF>
 #include <QPointingDevice>
 #include <QScopeGuard>
 #include <QTemporaryDir>
@@ -232,10 +233,99 @@ private slots:
             QVERIFY(!point.hasPressure());
     }
 
-    void tapWithoutMovementLeavesNoStroke()
+    // ink-beauty-pass, D5, сценарий «Точка над буквой»: касание пером без
+    // движения оставляет точку - видимую уже во время касания, одним штрихом
+    // в истории и в геометрии страницы.
+    void tapWithoutMovementLeavesDot()
     {
-        m_canvas.beginInkAt(QPointF(450, 350), 0.5, false);
+        m_canvas.goToPage(0);
+        const QPointF at(450, 350);
+        const int page = m_canvas.pageAtView(at);
+        QVERIFY(page >= 0);
+
+        QVERIFY(m_canvas.beginInkAt(at, 0.5, false));
+        // Мокрая точка видна под пером до отрыва: диск из двух полудисков.
+        QVERIFY2(m_canvas.wetStripVertexCount() >= 4 * (StrokeTessellator::kCapPairs + 1),
+                 qPrintable(QStringLiteral("мокрая полоса: %1 вершин")
+                                .arg(m_canvas.wetStripVertexCount())));
         m_canvas.endInk();
+
+        QCOMPARE(m_ink.strokeCount(), 1);
+        const Stroke dot = m_ink.allStrokes().first().stroke;
+        QCOMPARE(dot.points.size(), 2);
+        QCOMPARE(dot.points[0].position, dot.points[1].position);
+        // Модель штриха считает во float: точка касания - с точностью до 1e-3.
+        QVERIFY(QLineF(dot.points[0].position, m_canvas.viewToPage(page, at)).length() < 1e-3);
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), 1);
+
+        // Отмена и повтор - как у любого штриха.
+        m_ink.undo();
+        QCOMPARE(m_ink.strokeCount(), 0);
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), 0);
+        m_ink.redo();
+        QCOMPARE(m_ink.strokeCount(), 1);
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), 1);
+    }
+
+    // Сценарий «Случайный задев»: касание короче 30 мс с давлением ниже 0.05
+    // следа не оставляет. Мышь давления не сообщает - её щелчок ставит точку.
+    void accidentalGrazeLeavesNothing()
+    {
+        m_canvas.goToPage(0);
+        const QPointF at(450, 350);
+        QVERIFY(m_canvas.beginInkAt(at, 0.03, false, 20.000));
+        m_canvas.continueInkAt(at + QPointF(0.2, 0.0), 0.04, 20.010);
+        m_canvas.endInk();
+        QCOMPARE(m_ink.strokeCount(), 0);
+        QVERIFY(!m_canvas.isDrawing());
+
+        QVERIFY(m_canvas.beginInkAt(at, -1.0, false, 21.000));
+        m_canvas.endInk();
+        QCOMPARE(m_ink.strokeCount(), 1);
+    }
+
+    // Сценарий «Точка над буквой»: точка сохраняется в заметке, в контуре
+    // экспорта она круг, и ластик стирает её, как любой штрих.
+    void dotIsSavedExportedAndErased()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString notePath = dir.filePath(QStringLiteral("dot.uqn"));
+        NoteStore store;
+        QVERIFY(store.create(notePath, fixtures::textbook()));
+        store.attach(&m_ink);
+
+        m_canvas.goToPage(0);
+        const QPointF at(450, 350);
+        QVERIFY(m_canvas.beginInkAt(at, 0.6, false, 30.0));
+        m_canvas.endInk();
+        QCOMPARE(m_ink.strokeCount(), 1);
+        const Stroke dot = m_ink.allStrokes().first().stroke;
+
+        QVERIFY(store.flush());
+        {
+            NoteStore reopened;
+            InkDocument restored;
+            QVERIFY(reopened.openNote(notePath));
+            QVERIFY(reopened.load(&restored));
+            QCOMPARE(restored.strokeCount(), 1);
+            const QList<InkPoint> points = restored.allStrokes().first().stroke.points;
+            QCOMPARE(points.size(), 2);
+            for (const InkPoint &point : points)
+                QVERIFY(QLineF(point.position, dot.points.first().position).length() < 1e-3);
+        }
+
+        // Контур экспорта - круг диаметром в толщину точки.
+        StrokeTessellator tessellator;
+        tessellator.setWidth(dot.width);
+        tessellator.setStyle(dot.style);
+        const QRectF bounds = tessellator.outline(dot.points).boundingRect();
+        const qreal diameter = 2.0 * tessellator.halfWidthAt(dot.points.last());
+        QVERIFY(qAbs(bounds.width() - diameter) < 1e-3);
+        QVERIFY(qAbs(bounds.height() - diameter) < 1e-3);
+
+        m_canvas.setTool(DocumentCanvas::Tool::Eraser);
+        drawLine(&m_canvas, at + QPointF(-6, 0), at + QPointF(6, 0));
         QCOMPARE(m_ink.strokeCount(), 0);
     }
 

@@ -182,6 +182,17 @@ private slots:
         ink->undo();
         QCOMPARE(ink->insertCount(), 1);
         QCOMPARE(ink->strokesInInsert(id).size(), 1);
+
+        // ink-beauty-pass, D5. Контроль сценария «Касание значка не рисует»:
+        // тот же щелчок по странице мимо элементов вкладыша ставит точку -
+        // значит, выше точки не было потому, что касание забрал значок.
+        QCoreApplication::processEvents();
+        const QPointF free = canvas->documentToView(canvas->layout().pageRect(0).topLeft()
+                                                    + QPointF(100, 450));
+        QCOMPARE(canvas->pageAtView(free), 0);
+        QCOMPARE(canvas->insertAtView(free), quint64(0));
+        click(window, scene(free));
+        QCOMPARE(ink->allStrokes().size(), 1);
     }
 
     // Элементы управления стоят на рамке вкладыша при восстановленном виде и

@@ -6,6 +6,10 @@
 
 namespace {
 
+// Порог случайного задева (design.md, D5).
+constexpr qreal kGrazeSeconds = 0.030;
+constexpr qreal kGrazePressure = 0.05;
+
 QPointF normalizedDirection(const QPointF &from, const QPointF &to, const QPointF &fallback)
 {
     const QPointF delta = to - from;
@@ -59,6 +63,7 @@ void WetStroke::reset()
     m_directions.clear();
     m_settledVertices = 0;
     m_jointedPoints = 0;
+    m_settledArc = 0.0;
 }
 
 int WetStroke::addPoint(const InkPoint &raw)
@@ -87,20 +92,25 @@ void WetStroke::rebuildTail()
     if (points.isEmpty())
         return;
 
-    // Направления новых окончательных сегментов.
+    // Направления новых окончательных сегментов и длина окончательной осевой.
     QPointF previous = m_directions.isEmpty() ? QPointF(1.0, 0.0) : m_directions.constLast();
     for (int i = m_directions.size(); i + 1 < points.size(); ++i) {
+        const QPointF delta = points[i + 1].position - points[i].position;
+        m_settledArc += std::hypot(delta.x(), delta.y());
         previous = normalizedDirection(points[i].position, points[i + 1].position, previous);
         m_directions.append(previous);
     }
 
     if (m_jointedPoints == 0) {
         if (!startCapIsSettled(points)) {
-            // Хорда для начального торца ещё не известна: вся полоса
-            // провизорная и строится тем же правилом, что и сухая.
+            // Штрих ещё может оказаться точкой (design.md, D5), и хорда для
+            // начального торца ещё не известна: вся полоса провизорная и
+            // строится тем же правилом, что и сухая. Касание показывает точку
+            // сразу, а не пустое место до отрыва, и той толщины, которой её
+            // оставит finish(), - по наибольшему нажиму касания.
             QList<InkPoint> all = points;
             all.append(provisional);
-            m_strip = m_tessellator.tessellate(all);
+            m_strip = m_tessellator.tessellate(withDotTwin(all));
             return;
         }
         const qreal radius = m_tessellator.halfWidthAt(points.first());
@@ -146,7 +156,9 @@ bool WetStroke::startCapIsSettled(const QList<InkPoint> &points) const
 {
     // Хорда либо уже найдена среди первых kCapLookback точек, либо искать её
     // дальше незачем - тем же правилом, что и StrokeTessellator::capDirection.
-    if (points.isEmpty())
+    // Точкой штрих перестаёт быть навсегда: окончательные точки только
+    // добавляются, длина осевой только растёт.
+    if (points.isEmpty() || m_settledArc < m_tessellator.width())
         return false;
     return StrokeTessellator::capChordIndex(points, StrokeTessellator::CapEnd::Start,
                                             m_tessellator.halfWidthAt(points.constFirst()))
@@ -160,9 +172,32 @@ Stroke WetStroke::finish()
 
     m_sampler.finish();
     rebuildTail();
+    m_active = false;
+
+    // Случайный задев, а не точка: короче 30 мс и почти без нажима
+    // (design.md, D5). У мыши давления нет, её касание не отбрасывается.
+    const qreal peak = m_sampler.peakPressure();
+    if (peak >= 0.0 && peak < kGrazePressure && m_sampler.contactDuration() < kGrazeSeconds) {
+        m_strip.clear();
+        m_settledVertices = 0;
+        return {};
+    }
 
     Stroke stroke = m_prototype;
-    stroke.points = m_sampler.points();
-    m_active = false;
+    stroke.points = withDotTwin(m_sampler.points());
     return stroke;
+}
+
+QList<InkPoint> WetStroke::withDotTwin(QList<InkPoint> points) const
+{
+    // Касание начинается и кончается почти без нажима, а точки касания со
+    // сдвигом - это его края: без этой точки капсула вышла бы тоньше нажима.
+    // Касание из одной точки - частный случай: Stroke::isValid требует двух.
+    if (points.isEmpty() || !m_tessellator.isDot(points))
+        return points;
+    InkPoint twin = points.constLast();
+    if (twin.hasPressure())
+        twin.pressure = m_sampler.peakPressure();
+    points.append(twin);
+    return points;
 }

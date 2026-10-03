@@ -92,6 +92,11 @@ public:
     // на экране, поэтому экспорт не может разойтись с тем, что видно.
     QPolygonF outline(const QList<InkPoint> &points) const;
 
+    // Точка (design.md, D5): осевая короче полной толщины пера. Такой штрих
+    // tessellate() рисует капсулой, а WetStroke дописывает к нему точку с
+    // наибольшим нажимом касания - решение у обоих одно.
+    bool isDot(const QList<InkPoint> &points) const;
+
     // Полуширина штриха в конкретной точке - по ней тесты проверяют, что
     // толщина следует за давлением.
     qreal halfWidthAt(const InkPoint &point) const;
@@ -101,6 +106,10 @@ public:
     static bool isDegenerate(const QVector<Vertex> &strip);
 
 private:
+    // Капсула от первой до последней точки с наибольшей полушириной; при
+    // совпадающих концах - диск.
+    void emitDot(QVector<Vertex> &strip, const QList<InkPoint> &points) const;
+
     qreal m_width = 2.4;
     qreal m_minWidthFactor = 0.25;
     qreal m_constantPressure = 0.65;

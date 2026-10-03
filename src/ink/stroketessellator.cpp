@@ -138,6 +138,37 @@ QPointF StrokeTessellator::capDirection(const QList<InkPoint> &points, CapEnd en
     return direction.isNull() ? QPointF(1.0, 0.0) : direction;
 }
 
+bool StrokeTessellator::isDot(const QList<InkPoint> &points) const
+{
+    // Длина осевой копится в том же порядке, что и у мокрого штриха
+    // (WetStroke::rebuildTail): решение «точка или нет» обязано совпасть.
+    qreal arc = 0.0;
+    for (int i = 1; i < points.size(); ++i) {
+        const QPointF delta = points[i].position - points[i - 1].position;
+        arc += std::hypot(delta.x(), delta.y());
+        if (arc >= m_width)
+            return false;
+    }
+    return true;
+}
+
+void StrokeTessellator::emitDot(QVector<Vertex> &strip, const QList<InkPoint> &points) const
+{
+    // Толщина точки - по самому сильному нажиму касания, а не по слабым его
+    // краям: касание начинается и кончается почти без давления.
+    qreal radius = 0.0;
+    for (const InkPoint &point : points)
+        radius = qMax(radius, halfWidthAt(point));
+    const QPointF from = points.constFirst().position;
+    const QPointF to = points.constLast().position;
+    QPointF direction = normalized(to - from);
+    if (direction.isNull())
+        direction = QPointF(1.0, 0.0);
+    // Два полудиска: при совпадающих концах они складываются в диск.
+    emitCap(strip, from, radius, direction, CapEnd::Start);
+    emitCap(strip, to, radius, direction, CapEnd::End);
+}
+
 void StrokeTessellator::emitJoint(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
                                   const QPointF &incoming, const QPointF &outgoing) const
 {
@@ -203,6 +234,15 @@ QVector<StrokeTessellator::Vertex> StrokeTessellator::tessellate(const QList<Ink
     QVector<Vertex> strip;
     if (points.size() < 2)
         return strip;
+
+    // Касание без движения или с едва заметным сдвигом - точка, а не
+    // чёрточка (design.md, D5). Правило зависит только от сохранённых точек,
+    // поэтому сухой вид совпадает с мокрым и с тем, что откроется из файла.
+    if (isDot(points)) {
+        strip.reserve(4 * (kCapPairs + 1));
+        emitDot(strip, points);
+        return strip;
+    }
 
     // Направления сегментов. Вырожденные сегменты (две точки в одном месте)
     // наследуют направление предыдущего, иначе нормаль была бы неопределена.

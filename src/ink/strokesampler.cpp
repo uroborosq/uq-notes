@@ -190,6 +190,7 @@ void StrokeSampler::reset()
     m_lastInputTime = 0.0;
     m_lastInputScreen = QPointF();
     m_lastInputPressure = -1.0;
+    m_peakPressure = -1.0;
     m_lastRaw = InkPoint();
     m_follow = FollowState();
     m_rawHistory.clear();
@@ -236,6 +237,7 @@ QList<InkPoint> StrokeSampler::append(const InkPoint &raw)
     m_lastInputTime = time;
     m_lastInputScreen = screen;
     m_lastInputPressure = pressure;
+    m_peakPressure = qMax(m_peakPressure, pressure);
     m_lastRaw = raw;
     m_rawHistory.append({screen, pressure, time});
     while (m_rawHistory.size() > kRawHistory)

@@ -77,6 +77,13 @@ public:
     const QList<InkPoint> &provisionalPoints() const { return m_provisional; }
     bool isEmpty() const { return m_points.isEmpty(); }
 
+    // Касание (design.md, D5). Длительность - от первого до последнего
+    // принятого отсчёта по их собственным меткам времени, в секундах.
+    qreal contactDuration() const { return m_started ? m_lastInputTime : 0.0; }
+    // Наибольшее отфильтрованное давление за касание; -1, если устройство
+    // давления не сообщает. Давление любой точки штриха не больше него.
+    qreal peakPressure() const { return m_peakPressure; }
+
     // Фильтр давления с параметрами сэмплера. Открыт для эталонов
     // tst_strokesampler: давление точки сверяется с отфильтрованным давлением
     // пера в момент точки (ink-beauty-pass, design.md, D2).
@@ -137,6 +144,7 @@ private:
     qreal m_lastInputTime = 0.0;   // от начала штриха, после прижима
     QPointF m_lastInputScreen;     // положение последнего отсчёта на экране
     qreal m_lastInputPressure = -1.0;
+    qreal m_peakPressure = -1.0;
     // Последняя сырая точка контакта. Модель по своей природе отстаёт, а штрих
     // обязан кончаться там, где перо действительно оторвалось, - поэтому конец
     // берётся из сырых данных, а не из модели.
