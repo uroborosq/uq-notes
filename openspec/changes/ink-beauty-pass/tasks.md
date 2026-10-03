@@ -3589,7 +3589,7 @@ include-ом.
 
   ```sh
   OUT=$(mktemp -d)
-  ./build/tools/stroke-lab/stroke-lab --variants baseline,app-legacy --no-png --out $OUT/law025
+  ./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline,app-legacy --no-png --out $OUT/law025
   jq -r '.["app-legacy"].s1 | "track \(.["width_track_rms_rel@mean"]) rise \(.["width_rise_px@mean"]) end \(.["width_end_ratio@mean"]) mean \(.["width_mean_ratio@mean"]) dev \(.["centerline_dev_mean_px@mean"]) facets \(.["facet_count_2deg@sum"]) cpu \(.["cpu_us_per_event_mean@mean"]) mut \(.["settled_mutations@sum"])"' $OUT/law025/summary.json
   jq '[.samples[] | select(.scale == 1) | .width_end_ratio_truth | select(. != null)] | add / length' $OUT/law025/app-legacy/metrics.json
   ```
@@ -3619,7 +3619,7 @@ include-ом.
 - [ ] 5.6 **Гейт B: заострение на законе 0.08.**
 
   ```sh
-  ./build/tools/stroke-lab/stroke-lab --variants baseline --min-width-factor 0.08 --no-png --out $OUT/law008
+  ./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline --min-width-factor 0.08 --no-png --out $OUT/law008
   jq -r '.baseline.s1 | "rise \(.["width_rise_px@mean"]) end \(.["width_end_ratio@mean"]) track \(.["width_track_rms_rel@mean"]) mean \(.["width_mean_ratio@mean"])"' $OUT/law008/summary.json
   jq '[.samples[] | select(.scale == 1) | .width_end_ratio_truth | select(. != null)] | add / length' $OUT/law008/baseline/metrics.json
   jq '[.samples[] | select(.scale == 1) | .width_rise_truth_px | select(. != null)] | add / length' $OUT/law008/baseline/metrics.json
@@ -3655,8 +3655,8 @@ include-ом.
   `W·(0.25 + 0.75p)`: на нём сняты числа D2.
 
   ```sh
-  ./build/tools/stroke-lab/stroke-lab --variants baseline,app-legacy --no-png --out /tmp/lab/law025
-  ./build/tools/stroke-lab/stroke-lab --variants baseline --min-width-factor 0.08 --no-png --out /tmp/lab/law008
+  ./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline,app-legacy --no-png --out /tmp/lab/law025
+  ./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline --min-width-factor 0.08 --no-png --out /tmp/lab/law008
   ```
 
   | метрика (масштаб 1) | baseline шага 0 | app-legacy, закон 0.25 | baseline, закон 0.08 | эталон 0.25 / 0.08 |
@@ -6731,6 +6731,12 @@ provisional))`: к точке дописывается та же пиковая 
   sed -n '/### scale 1/,/### scale 2.5/p' /tmp/uq-step2/summary.md
   python3 -c "import json; [print(s['sample'], s['scale'], s['centerline_points']) for s in json.load(open('/tmp/uq-step2/baseline/metrics.json'))['samples'] if s['sample'] == 'dots_taps']"
   ```
+
+  Числа ниже сняты при составлении плана на корпусе без сэмплов `dots_*`
+  шага 0. Если они расходятся, сравнивать не с ними, а с прогоном того же
+  корпуса на коммите шага 1 (`git worktree add /tmp/uq-step1 <коммит 5.11>`,
+  сборка стенда там, та же команда): траектория в шаге 2 не меняется, поэтому
+  осевые метрики обязаны совпасть с ним.
 
   Ожидается: `mut` (settled_mutations) не больше, чем до шага 2; траектория в
   шаге 2 не менялась (D6 отложен), поэтому осевые метрики те же, что на шаге 1, с
