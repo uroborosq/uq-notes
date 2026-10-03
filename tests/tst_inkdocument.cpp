@@ -128,6 +128,38 @@ private slots:
         }
     }
 
+    // ink-beauty-pass, сценарий «Отмена и повтор» требования «Закон толщины
+    // хранится со штрихом»: отмена, повтор и отмена стирания возвращают штрих
+    // с тем же законом толщины.
+    void undoRedoKeepStrokeStyle()
+    {
+        InkDocument ink;
+        Stroke stroke = lineOnPage(1, QPointF(5, 5), QPointF(80, 40));
+        stroke.style = StrokeStyle::Tapered;
+        const quint64 tapered = ink.addStroke(stroke);
+        const quint64 legacy = ink.addStroke(lineOnPage(1, QPointF(5, 60), QPointF(80, 90)));
+        const auto styleOf = [&ink](quint64 id) {
+            for (const InkDocument::Record &record : ink.strokesOnPage(1)) {
+                if (record.id == id)
+                    return record.stroke.style;
+            }
+            return StrokeStyle(-1);
+        };
+
+        ink.undo();
+        ink.undo();
+        ink.redo();
+        ink.redo();
+        QCOMPARE(styleOf(tapered), StrokeStyle::Tapered);
+        QCOMPARE(styleOf(legacy), StrokeStyle::Legacy);
+
+        ink.eraseStrokes({tapered, legacy});
+        QCOMPARE(ink.strokeCount(), 0);
+        ink.undo();
+        QCOMPARE(styleOf(tapered), StrokeStyle::Tapered);
+        QCOMPARE(styleOf(legacy), StrokeStyle::Legacy);
+    }
+
     // Гранулярность: одно движение ластика - одна отмена, сколько бы штрихов
     // оно ни стёрло.
     void oneEraserActionUndoesAsOne()

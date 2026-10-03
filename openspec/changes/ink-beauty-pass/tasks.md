@@ -2510,7 +2510,7 @@ Tapered 0.710.
 
 ### 4a. Тип, тесселятор, мокрый штрих, история
 
-- [ ] 4.1 **Тест закона толщины в `tests/tst_stroketessellator.cpp`.** Вставить
+- [x] 4.1 **Тест закона толщины в `tests/tst_stroketessellator.cpp`.** Вставить
   перед `void loopHasNoArtifacts()`:
 
   ```cpp
@@ -2564,7 +2564,7 @@ Tapered 0.710.
   `setConstantPressure(1.0)`) после правки 4.5 даёт `3·(0.25 + 0.75·1) = 3.0` -
   то же, что и сейчас, правки не требует.
 
-- [ ] 4.2 **Тест отмены и повтора в `tests/tst_inkdocument.cpp`.** Вставить
+- [x] 4.2 **Тест отмены и повтора в `tests/tst_inkdocument.cpp`.** Вставить
   перед комментарием `// Гранулярность: одно движение ластика - одна отмена, сколько бы штрихов`:
 
   ```cpp
@@ -2606,13 +2606,13 @@ Tapered 0.710.
   `Record` целиком (`QList<Record> records`), и поле едет вместе со штрихом.
   Тест закрепляет сценарий спеки против будущей «оптимизации» истории.
 
-- [ ] 4.3 **Прогон: сборка падает.**
+- [x] 4.3 **Прогон: сборка падает.**
   `cmake --build build -j$(nproc) 2>&1 | grep -m3 error`
   Ожидается ошибка компиляции `tst_stroketessellator.cpp` и
   `tst_inkdocument.cpp`: `'StrokeStyle' has not been declared` /
   `'class StrokeTessellator' has no member named 'setStyle'`.
 
-- [ ] 4.4 **`StrokeStyle` и `Stroke::style` в `src/ink/inktypes.h`.** Перед
+- [x] 4.4 **`StrokeStyle` и `Stroke::style` в `src/ink/inktypes.h`.** Перед
   комментарием `// Точка траектории. Координаты - в системе координат страницы (точки PDF),`
   вставить:
 
@@ -2636,7 +2636,7 @@ Tapered 0.710.
       StrokeStyle style = StrokeStyle::Legacy;
   ```
 
-- [ ] 4.5 **`StrokeTessellator::setStyle` и закон без давления.**
+- [x] 4.5 **`StrokeTessellator::setStyle` и закон без давления.**
   `src/ink/stroketessellator.h`: блок
 
   ```cpp
@@ -2709,11 +2709,11 @@ Tapered 0.710.
   Инициализатор `qreal m_minWidthFactor = 0.25;` в заголовке не меняется: это
   и есть Legacy по умолчанию.
 
-- [ ] 4.6 **Прогон: тесселятор и история зелёные.**
+- [x] 4.6 **Прогон: тесселятор и история зелёные.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_(stroketessellator|inkdocument)$' --output-on-failure`
   Ожидается `100% tests passed, 0 tests failed out of 2`.
 
-- [ ] 4.7 **Тест мокрого штриха в `tests/tst_wetstroke.cpp`.** Вставить перед
+- [x] 4.7 **Тест мокрого штриха в `tests/tst_wetstroke.cpp`.** Вставить перед
   `void geometryStaysFiniteThroughSharpTurns()`:
 
   ```cpp
@@ -2743,12 +2743,12 @@ Tapered 0.710.
 
   ```
 
-- [ ] 4.8 **Прогон: мокрый штрих рисует прежним законом.**
+- [x] 4.8 **Прогон: мокрый штрих рисует прежним законом.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_wetstroke$' --output-on-failure`
   Ожидается `1 failed`: `wetStrokeUsesPrototypeStyle` - «толщина 1 в паре 0»
   (4·0.25 вместо 4·0.08; стиль в `Stroke` уже доходит, в тесселятор - нет).
 
-- [ ] 4.9 **`WetStroke::begin` задаёт закон.** `src/ink/wetstroke.cpp`, в конце
+- [x] 4.9 **`WetStroke::begin` задаёт закон.** `src/ink/wetstroke.cpp`, в конце
   `WetStroke::begin` после `    m_tessellator.setWidth(prototype.width);`
   вставить:
 
@@ -2758,13 +2758,13 @@ Tapered 0.710.
       m_tessellator.setStyle(prototype.style);
   ```
 
-- [ ] 4.10 **Прогон.**
+- [x] 4.10 **Прогон.**
   `cmake --build build -j$(nproc) && ctest --test-dir build -R '^tst_(wetstroke|strokesampler|stroketessellator|inkdocument)$' --output-on-failure`
   Ожидается `100% tests passed, 0 tests failed out of 4`
   (`incrementalResultMatchesFullTessellation` сравнивает с тесселятором по
   умолчанию, а прототип там Legacy - совпадает).
 
-- [ ] 4.11 **Коммит.**
+- [x] 4.11 **Коммит.**
 
   ```sh
   git add src/ink/inktypes.h src/ink/stroketessellator.h src/ink/stroketessellator.cpp \

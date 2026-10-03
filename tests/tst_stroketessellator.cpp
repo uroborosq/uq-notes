@@ -172,6 +172,48 @@ private slots:
         }
     }
 
+    // ink-beauty-pass, D3, сценарии «Заострение новых штрихов» и «Перо без
+    // данных о давлении»: Legacy - W·(0.25 + 0.75p), Tapered - W·(0.08 +
+    // 0.92p), без давления оба - W·0.7375 при давлении по умолчанию 0.65.
+    void styleSelectsThicknessLaw()
+    {
+        const auto widthAt = [](const StrokeTessellator &tessellator, qreal pressure) {
+            return 2.0 * tessellator.halfWidthAt({QPointF(0, 0), pressure, 0.0});
+        };
+        const auto near = [](qreal a, qreal b) { return qAbs(a - b) < 1e-9; };
+
+        StrokeTessellator tessellator;
+        tessellator.setWidth(4.0);
+        // По умолчанию - прежний закон: им рисуются штрихи старых заметок.
+        QVERIFY(near(widthAt(tessellator, 0.0), 4.0 * 0.25));
+
+        tessellator.setStyle(StrokeStyle::Tapered);
+        QVERIFY(near(widthAt(tessellator, 0.0), 4.0 * 0.08));
+        QVERIFY(near(widthAt(tessellator, 0.5), 4.0 * (0.08 + 0.92 * 0.5)));
+        QVERIFY(near(widthAt(tessellator, 1.0), 4.0));
+        QVERIFY2(near(widthAt(tessellator, -1.0), 4.0 * 0.7375),
+                 qPrintable(QStringLiteral("без давления %1").arg(widthAt(tessellator, -1.0))));
+
+        tessellator.setStyle(StrokeStyle::Legacy);
+        QVERIFY(near(widthAt(tessellator, 0.0), 4.0 * 0.25));
+        QVERIFY(near(widthAt(tessellator, 0.5), 4.0 * (0.25 + 0.75 * 0.5)));
+        QVERIFY(near(widthAt(tessellator, 1.0), 4.0));
+        QVERIFY(near(widthAt(tessellator, -1.0), 4.0 * 0.7375));
+
+        // И полоса идёт по тому же закону: прямая с нулевым нажимом.
+        tessellator.setStyle(StrokeStyle::Tapered);
+        QList<InkPoint> points;
+        for (int i = 0; i < 10; ++i)
+            points.append({QPointF(i * 5.0, 50.0), 0.0, i / 200.0});
+        const QVector<Vertex> strip = tessellator.tessellate(points);
+        QCOMPARE(strip.size(), points.size() * 2);
+        for (int i = 0; i + 1 < strip.size(); i += 2) {
+            const qreal width = std::hypot(strip[i].x - strip[i + 1].x, strip[i].y - strip[i + 1].y);
+            QVERIFY2(qAbs(width - 4.0 * 0.08) < 1e-4,
+                     qPrintable(QStringLiteral("толщина %1 в паре %2").arg(width).arg(i / 2)));
+        }
+    }
+
     void loopHasNoArtifacts()
     {
         StrokeTessellator tessellator;

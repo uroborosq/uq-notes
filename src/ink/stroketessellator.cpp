@@ -14,6 +14,13 @@ constexpr qreal kRoundJoinStep = 0.28; // радиан, ~16 градусов
 // Ниже этой длины биссектриса считается вырожденной (разворот почти на 180).
 constexpr qreal kBisectorEpsilon = 0.2;
 
+// Доля толщины при нулевом нажиме по законам штриха (ink-beauty-pass,
+// design.md, D3). 0.08, а не 0, как у rnote (W·p): на стенде конец 0.57 и
+// заход 15 px против 0.544 и 13.7 px у эталона, а касание почти без нажима
+// не пропадает совсем.
+constexpr qreal kLegacyMinWidthFactor = 0.25;
+constexpr qreal kTaperedMinWidthFactor = 0.08;
+
 QPointF normalOf(const QPointF &direction)
 {
     return QPointF(-direction.y(), direction.x());
@@ -54,11 +61,23 @@ void StrokeTessellator::setConstantPressure(qreal pressure)
     m_constantPressure = qBound(0.0, pressure, 1.0);
 }
 
+void StrokeTessellator::setStyle(StrokeStyle style)
+{
+    setMinWidthFactor(style == StrokeStyle::Tapered ? kTaperedMinWidthFactor
+                                                    : kLegacyMinWidthFactor);
+}
+
 qreal StrokeTessellator::halfWidthAt(const InkPoint &point) const
 {
-    // Устройство не сообщает давление - штрих идёт постоянной толщиной.
-    const qreal pressure = point.hasPressure() ? qBound(0.0, point.pressure, 1.0)
-                                               : m_constantPressure;
+    // Устройство не сообщает давление - штрих идёт постоянной толщиной, и
+    // всегда по прежнему закону: W·0.7375 при давлении по умолчанию 0.65,
+    // какой бы ни был стиль штриха (D3).
+    if (!point.hasPressure()) {
+        const qreal factor =
+            kLegacyMinWidthFactor + (1.0 - kLegacyMinWidthFactor) * m_constantPressure;
+        return m_width * factor * 0.5;
+    }
+    const qreal pressure = qBound(0.0, point.pressure, 1.0);
     const qreal factor = m_minWidthFactor + (1.0 - m_minWidthFactor) * pressure;
     return m_width * factor * 0.5;
 }

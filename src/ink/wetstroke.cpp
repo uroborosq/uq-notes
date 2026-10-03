@@ -27,6 +27,9 @@ void WetStroke::begin(int page, const Stroke &prototype, qreal scale)
     m_prototype.page = page;
     m_prototype.points.clear();
     m_tessellator.setWidth(prototype.width);
+    // Мокрый штрих рисуется тем же законом толщины, с каким штрих потом
+    // ляжет в страницу и в файл (ink-beauty-pass, design.md, D3).
+    m_tessellator.setStyle(prototype.style);
 }
 
 void WetStroke::reset()

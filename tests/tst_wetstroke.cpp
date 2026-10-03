@@ -214,6 +214,30 @@ private slots:
         QVERIFY(wet.provisionalPoints().isEmpty());
     }
 
+    // ink-beauty-pass, D3: мокрый штрих рисуется законом толщины своего
+    // прототипа, и завершённый штрих уносит этот закон с собой.
+    void wetStrokeUsesPrototypeStyle()
+    {
+        Stroke proto = prototype(4.0);
+        proto.style = StrokeStyle::Tapered;
+        WetStroke wet;
+        wet.begin(0, proto);
+        // Прямая с нулевым нажимом: каждая пара вершин полосы - поперечник
+        // штриха, и он обязан быть 0.08 толщины пера, а не 0.25.
+        for (int i = 0; i < 40; ++i)
+            wet.addPoint({QPointF(i * 3.0, 20.0), 0.0, i / 200.0});
+        const Stroke stroke = wet.finish();
+        QCOMPARE(stroke.style, StrokeStyle::Tapered);
+
+        const QVector<WetStroke::Vertex> &strip = wet.strip();
+        QVERIFY(strip.size() >= 4);
+        for (int i = 0; i + 1 < strip.size(); i += 2) {
+            const qreal width = std::hypot(strip[i].x - strip[i + 1].x, strip[i].y - strip[i + 1].y);
+            QVERIFY2(qAbs(width - 4.0 * 0.08) < 1e-3,
+                     qPrintable(QStringLiteral("толщина %1 в паре %2").arg(width).arg(i / 2)));
+        }
+    }
+
     void geometryStaysFiniteThroughSharpTurns()
     {
         WetStroke wet;
