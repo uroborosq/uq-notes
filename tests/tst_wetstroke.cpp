@@ -245,6 +245,79 @@ private slots:
         QVERIFY2(qAbs(angle) < 20.0, qPrintable(QStringLiteral("торец под %1°").arg(angle)));
     }
 
+    // ink-beauty-pass, D4: пока хорда для начального торца не известна, вся
+    // полоса провизорная; как только она известна, начальный торец ложится в
+    // окончательную часть и больше не переписывается. На этом переходе держится
+    // загрузчик кусков холста: окончательная часть только растёт.
+    void startCapSettlesOnceAndKeepsPrefix()
+    {
+        const qreal width = 6.0;
+        WetStroke wet;
+        wet.begin(0, prototype(width));
+        const qreal radius = width / 2.0; // полный нажим
+
+        // Медленное начало: перо ползёт по 0.05 на отсчёт, и несколько
+        // окончательных точек ложатся ближе радиуса от касания. Дальше - быстро.
+        QList<InkPoint> input;
+        qreal x = 20.0;
+        for (int i = 0; i < 160; ++i) {
+            x += i < 60 ? 0.05 : 2.0;
+            input.append({QPointF(x, 50.0), 1.0, i / 240.0});
+        }
+
+        int transition = -1;
+        int settledPointsBefore = 0; // окончательных точек, пока торец провизорный
+        int previousSettled = 0;
+        QVector<WetStroke::Vertex> prefix;
+        for (int i = 0; i < input.size(); ++i) {
+            const int added = wet.addPoint(input[i]);
+            const int settled = wet.settledVertexCount();
+            QVERIFY2(settled >= previousSettled,
+                     qPrintable(QStringLiteral("окончательная часть сжалась с %1 до %2 на отсчёте %3")
+                                    .arg(previousSettled).arg(settled).arg(i)));
+            QCOMPARE(added, settled - previousSettled);
+
+            if (transition < 0) {
+                if (added == 0) {
+                    QCOMPARE(settled, 0);
+                    // Пока торец провизорный, ни одна окончательная точка не
+                    // отошла на радиус.
+                    for (const InkPoint &point : wet.points())
+                        QVERIFY(QLineF(point.position, wet.points().constFirst().position).length()
+                                < radius);
+                    settledPointsBefore = int(wet.points().size());
+                    previousSettled = settled;
+                    continue;
+                }
+                transition = i;
+                // Начальный торец лёг целиком.
+                QVERIFY(settled >= kCapVertices);
+            } else {
+                // Префикс, объявленный окончательным раньше, не изменился.
+                QVERIFY2(sameStrip(wet.strip().mid(0, prefix.size()), prefix),
+                         qPrintable(QStringLiteral("окончательный префикс переписан на отсчёте %1")
+                                        .arg(i)));
+            }
+            prefix = wet.strip().mid(0, settled);
+            previousSettled = settled;
+        }
+
+        QVERIFY2(transition > 0, "начальный торец так и не стал окончательным");
+        // Хотя бы один окончательный сегмент лёг внутри радиуса: прежнее
+        // правило «торец окончательный с первым сегментом» здесь бы уже сработало.
+        QVERIFY2(settledPointsBefore >= 2,
+                 qPrintable(QStringLiteral("до перехода окончательных точек: %1")
+                                .arg(settledPointsBefore)));
+        QVERIFY(prefix.size() > 4 * kCapVertices);
+
+        // И итог - тот же, что у сухой полосы.
+        const Stroke stroke = wet.finish();
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        QVERIFY(sameStrip(wet.strip(), tessellator.tessellate(stroke.points)));
+    }
+
     // Сценарий «Резкая смена направления»: после разворота провизорная часть
     // полосы не торчит дальше, чем прошло само перо.
     void provisionalTailDoesNotOvershootReversal()

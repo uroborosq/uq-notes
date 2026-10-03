@@ -144,20 +144,13 @@ void WetStroke::rebuildTail()
 
 bool WetStroke::startCapIsSettled(const QList<InkPoint> &points) const
 {
-    if (points.size() < 2)
-        return false;
     // Хорда либо уже найдена среди первых kCapLookback точек, либо искать её
-    // дальше незачем - так же решает StrokeTessellator::capDirection.
-    if (points.size() >= StrokeTessellator::kCapLookback)
-        return true;
-    const QPointF start = points.constFirst().position;
-    const qreal radius = m_tessellator.halfWidthAt(points.constFirst());
-    for (int i = 1; i < points.size(); ++i) {
-        const QPointF delta = points[i].position - start;
-        if (std::hypot(delta.x(), delta.y()) >= radius)
-            return true;
-    }
-    return false;
+    // дальше незачем - тем же правилом, что и StrokeTessellator::capDirection.
+    if (points.isEmpty())
+        return false;
+    return StrokeTessellator::capChordIndex(points, StrokeTessellator::CapEnd::Start,
+                                            m_tessellator.halfWidthAt(points.constFirst()))
+        >= 0;
 }
 
 Stroke WetStroke::finish()

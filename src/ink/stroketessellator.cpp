@@ -103,23 +103,36 @@ void StrokeTessellator::emitCap(QVector<Vertex> &strip, const QPointF &position,
     }
 }
 
+int StrokeTessellator::capChordIndex(const QList<InkPoint> &points, CapEnd end, qreal radius)
+{
+    const int count = int(points.size());
+    if (count < 2)
+        return -1;
+    // Индекс k-й точки от того конца, у которого строится торец.
+    const auto indexOf = [count, end](int k) { return end == CapEnd::Start ? k : count - 1 - k; };
+    const QPointF tip = points[indexOf(0)].position;
+    const int reach = qMin(count, kCapLookback);
+    for (int k = 1; k < reach; ++k) {
+        const QPointF delta = points[indexOf(k)].position - tip;
+        if (std::hypot(delta.x(), delta.y()) >= radius)
+            return indexOf(k);
+    }
+    // Дальше kCapLookback точек не ищем: хорда - до последней из них.
+    return count >= kCapLookback ? indexOf(kCapLookback - 1) : -1;
+}
+
 QPointF StrokeTessellator::capDirection(const QList<InkPoint> &points, CapEnd end, qreal radius)
 {
     const int count = int(points.size());
     if (count < 2)
         return QPointF(1.0, 0.0);
-    // k-я точка от того конца, у которого строится торец.
-    const auto from = [&points, count, end](int k) {
-        return end == CapEnd::Start ? points[k].position : points[count - 1 - k].position;
-    };
-    const QPointF tip = from(0);
-    const int reach = qMin(count, kCapLookback);
-    QPointF far = tip;
-    for (int k = 1; k < reach; ++k) {
-        far = from(k);
-        if (std::hypot(far.x() - tip.x(), far.y() - tip.y()) >= radius)
-            break;
-    }
+    const QPointF tip = end == CapEnd::Start ? points.constFirst().position
+                                             : points.constLast().position;
+    // Хорда ещё не определена - торец смотрит на самую дальнюю от конца точку.
+    const int index = capChordIndex(points, end, radius);
+    const QPointF far = index >= 0 ? points[index].position
+                                   : (end == CapEnd::Start ? points.constLast().position
+                                                           : points.constFirst().position);
     // Направление движения пера: в начале - от касания вперёд, в конце - к отрыву.
     const QPointF direction = normalized(end == CapEnd::Start ? far - tip : tip - far);
     return direction.isNull() ? QPointF(1.0, 0.0) : direction;

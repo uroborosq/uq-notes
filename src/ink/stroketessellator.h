@@ -74,6 +74,13 @@ public:
     // отрыве дотяжка до точки контакта дописывает отрезок короче шага со
     // случайным направлением. Вырожденный штрих - (1, 0).
     static QPointF capDirection(const QList<InkPoint> &points, CapEnd end, qreal radius);
+    // Индекс точки, до которой идёт хорда торца: первая на расстоянии не
+    // меньше radius от конца среди kCapLookback точек, а если таких нет, но
+    // точек уже kCapLookback - последняя из них. -1, пока хорда не определена:
+    // точек меньше kCapLookback и ни одна не отошла на radius. Одно правило и
+    // для сухого торца, и для решения мокрого штриха, когда начальный торец
+    // становится окончательным - только так мокрое совпадает с сухим.
+    static int capChordIndex(const QList<InkPoint> &points, CapEnd end, qreal radius);
     // Стык: биссектриса на пологом повороте, дуга скругления на резком.
     void emitJoint(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
                    const QPointF &incoming, const QPointF &outgoing) const;
