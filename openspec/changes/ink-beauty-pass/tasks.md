@@ -1253,7 +1253,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] 2.10 **Падающий тест: сводка «событие → показ».** В `tests/tst_framestats.cpp` добавить `#include "perf/presentationstats.h"` после `#include "perf/framestats.h"` и перед закрывающей `};` класса `TestFrameStats` вставить:
+- [x] 2.10 **Падающий тест: сводка «событие → показ».** В `tests/tst_framestats.cpp` добавить `#include "perf/presentationstats.h"` после `#include "perf/framestats.h"` и перед закрывающей `};` класса `TestFrameStats` вставить:
 ```cpp
     void frameKeepsOldestAndNewestInput()
     {
@@ -1314,7 +1314,7 @@ cmake --build build -j$(nproc) --target tst_framestats
 ```
   Ожидание: ошибка компиляции - нет `perf/presentationstats.h`.
 
-- [ ] 2.11 **Чистая часть: `PresentationStats`.** Создать `src/perf/presentationstats.h`:
+- [x] 2.11 **Чистая часть: `PresentationStats`.** Создать `src/perf/presentationstats.h`:
 ```cpp
 #pragma once
 
@@ -1460,7 +1460,7 @@ cmake --build build -j$(nproc) --target tst_framestats && ctest --test-dir build
 ```
   Ожидание: Passed, `Totals: 12 passed`.
 
-- [ ] 2.12 **Падающий тест: без `UQ_FRAME_LOG` подписки на показ нет.** В `tests/tst_idlepower.cpp` добавить `#include "perf/presentationfeedback.h"` после `#include "perf/framestats.h"` и после `frameStatsIsSilentWhenNotRequested()`:
+- [x] 2.12 **Падающий тест: без `UQ_FRAME_LOG` подписки на показ нет.** В `tests/tst_idlepower.cpp` добавить `#include "perf/presentationfeedback.h"` после `#include "perf/framestats.h"` и после `frameStatsIsSilentWhenNotRequested()`:
 ```cpp
     // То же требование для задержки до показа (ink-beauty-pass, D1): без
     // UQ_FRAME_LOG подписки на wp_presentation нет вовсе, даже когда кадры
@@ -1479,7 +1479,7 @@ cmake --build build -j$(nproc) --target tst_idlepower
 ```
   Ожидание: ошибка компиляции - нет `perf/presentationfeedback.h`.
 
-- [ ] 2.13 **`PresentationFeedback` и подключение к `FrameStats`.**
+- [x] 2.13 **`PresentationFeedback` и подключение к `FrameStats`.**
   Создать `src/perf/presentationfeedback.h`:
 ```cpp
 #pragma once
@@ -1955,7 +1955,7 @@ endif()
         m_presentation->dispatchPending();
 ```
 
-- [ ] 2.14 **Прогнать - сборка с протоколом и без, тесты зелёные.**
+- [x] 2.14 **Прогнать - сборка с протоколом и без, тесты зелёные.**
 ```sh
 cmake -S . -B build 2>&1 | grep 'wp_presentation'   # ожидание: "uq-notes: замер задержки до показа (wp_presentation) включён"
 cmake --build build -j$(nproc) && ctest --test-dir build --output-on-failure
@@ -1972,10 +1972,10 @@ cmake --build build-nowp -j$(nproc) --target uq-notes
 UQ_FRAME_LOG=1 ./build/src/uq-notes большой.pdf
 ```
   Писать пером 30-60 секунд, затем закрыть. Ожидание в выводе раз в секунду во время письма: строка `[frames] ... | latency (event stamp -> swap) last X max Y ms | foreign stamps 0` и следом `[present] event->present: frames N | oldest median A p95 B | newest median C | max D ms | discarded E | clock mismatch 0` с N около 100-120 (кадры с вводом за секунду при 120 Гц). Ориентир по стенду: недогон 9.5 px ≈ 23 мс до фотона, то есть `oldest median` порядка 15-35 мс; `latency (event stamp -> swap)` выше прежних 0.8-1.8 мс на доставку от композитора. В простое строк `[present]` нет (кадров с вводом нет).
-  Если `[present]` не появляется вовсе: `WAYLAND_DEBUG=client UQ_FRAME_LOG=1 ./build/src/uq-notes большой.pdf 2>&1 | grep -m5 -E 'wp_presentation(_feedback)?@'` - должны быть `wp_presentation@N.feedback(...)` и `wp_presentation_feedback@M.presented(...)`; нет `wp_presentation` в реестре - композитор протокол не даёт (тогда замер невозможен, записать в PERFORMANCE.md). `foreign stamps` больше нуля или `clock mismatch` больше нуля - метки или время показа не в `CLOCK_MONOTONIC`; числа этого прогона не годятся, записать как наблюдение. `UQ_DEMO_INK` для этого замера не годится: сценарный ввод идёт без меток, и задержка считается от обработки.
+  Если `[present]` не появляется вовсе: `WAYLAND_DEBUG=client UQ_FRAME_LOG=1 ./build/src/uq-notes большой.pdf 2>&1 | grep -m5 -E 'wp_presentation(_feedback)?[@#]'` - должны быть `wp_presentation@N.feedback(...)` и `wp_presentation_feedback@M.presented(...)` (libwayland 1.26 пишет `#` вместо `@`); нет `wp_presentation` в реестре - композитор протокол не даёт (тогда замер невозможен, записать в PERFORMANCE.md). `foreign stamps` больше нуля или `clock mismatch` больше нуля - метки или время показа не в `CLOCK_MONOTONIC`; числа этого прогона не годятся, записать как наблюдение. `UQ_DEMO_INK` для этого замера не годится: сценарный ввод идёт без меток, и задержка считается от обработки.
   Записать медиану, p95 и максимум за 3 прогона в таблицу PERFORMANCE.md (2.16).
 
-- [ ] 2.16 **PERFORMANCE.md: как теперь меряется.**
+- [x] 2.16 **PERFORMANCE.md: как теперь меряется.**
   - В «Как воспроизвести» после абзаца про `UQ_FRAME_LOG` добавить:
 ```markdown
 На Wayland к сводке раз в секунду добавляется строка `[present]` - задержка
@@ -2033,7 +2033,7 @@ Wayland её нет вовсе (`specs/idle-power`).
 ```
     «Не замерено» заменяется числами из 2.15. Если замера на устройстве в этом шаге нет, таблица остаётся с «не замерено», и это явно сказано в сообщении коммита.
 
-- [ ] 2.17 **Финальный коммит шага 0.**
+- [x] 2.17 **Финальный коммит шага 0.**
 ```sh
 git add CMakeLists.txt src/CMakeLists.txt src/perf/ tests/tst_framestats.cpp tests/tst_idlepower.cpp PERFORMANCE.md
 git status --short   # ожидание: ничего неподготовленного, кроме .claude/worktrees/

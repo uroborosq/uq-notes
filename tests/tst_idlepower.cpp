@@ -35,6 +35,7 @@
 #include "ink/inkdocument.h"
 #include "pdf/pdfdocumentmodel.h"
 #include "perf/framestats.h"
+#include "perf/presentationfeedback.h"
 
 namespace {
 
@@ -181,6 +182,18 @@ private slots:
         QVERIFY(spy.isValid());
         QTest::qWait(1000);
         QCOMPARE(spy.count(), 0);
+    }
+
+    // То же требование для задержки до показа (ink-beauty-pass, D1): без
+    // UQ_FRAME_LOG подписки на wp_presentation нет вовсе, даже когда кадры
+    // идут, - ни объекта протокола, ни своей очереди событий.
+    void presentationFeedbackIsNotCreatedWhenNotRequested()
+    {
+        QVERIFY2(!m_stats->isLogging(),
+                 "тест должен идти без UQ_FRAME_LOG, иначе он проверяет другой режим");
+        m_canvas->update();
+        QTest::qWait(300);
+        QVERIFY(!m_stats->findChild<PresentationFeedback *>());
     }
 };
 

@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "perf/framestats.h"
+#include "perf/presentationstats.h"
 
 namespace {
 
@@ -79,6 +80,60 @@ private slots:
         stats.markInput(waylandStampSeconds(nowMs - 60'000));
         QCOMPARE(stats.foreignInputStamps(), 1);
         QVERIFY(stats.summary().contains(QStringLiteral("foreign stamps 1")));
+    }
+
+    void frameKeepsOldestAndNewestInput()
+    {
+        FrameInputs inputs;
+        QVERIFY(inputs.isEmpty());
+        inputs.add(0); // «метки нет» не считается событием
+        QVERIFY(inputs.isEmpty());
+        inputs.add(30 * kMs);
+        inputs.add(10 * kMs);
+        inputs.add(20 * kMs);
+        QCOMPARE(inputs.oldestNs, 10 * kMs);
+        QCOMPARE(inputs.newestNs, 30 * kMs);
+    }
+
+    void summaryGivesMedianAndP95()
+    {
+        PresentationStats stats;
+        // 20 кадров: самое раннее событие кадра на 10..29 мс раньше показа,
+        // самое позднее - на 2 мс раньше.
+        for (int i = 0; i < 20; ++i) {
+            FrameInputs inputs;
+            const qint64 presented = 1000 * kMs + i * 8 * kMs;
+            inputs.add(presented - (10 + i) * kMs);
+            inputs.add(presented - 2 * kMs);
+            stats.addPresented(inputs, presented);
+        }
+        stats.addDiscarded();
+
+        const PresentationSummary summary = stats.takeSummary();
+        QCOMPARE(summary.presented, 20);
+        QCOMPARE(summary.discarded, 1);
+        QCOMPARE(summary.rejected, 0);
+        QCOMPARE(summary.oldestMedianMs, 20.0); // отсортированная выборка, элемент 10
+        QCOMPARE(summary.oldestP95Ms, 29.0);    // элемент 19
+        QCOMPARE(summary.newestMedianMs, 2.0);
+        QCOMPARE(summary.maxMs, 29.0);
+
+        // Сводка за секунду: накопленное сброшено.
+        QVERIFY(stats.takeSummary().isEmpty());
+    }
+
+    void presentationBeforeEventIsAClockMismatch()
+    {
+        PresentationStats stats;
+        FrameInputs inputs;
+        inputs.add(50 * kMs);
+        stats.addPresented(inputs, 40 * kMs);
+        stats.addPresented(FrameInputs(), 60 * kMs); // кадр без ввода не считается
+
+        const PresentationSummary summary = stats.takeSummary();
+        QCOMPARE(summary.presented, 0);
+        QCOMPARE(summary.rejected, 1);
+        QVERIFY(summary.toString().contains(QStringLiteral("clock mismatch 1")));
     }
 
 };

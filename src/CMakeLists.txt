@@ -40,6 +40,10 @@ qt_add_qml_module(uqnotes_core
         pdf/pdfdocumentmodel.h
         perf/framestats.cpp
         perf/framestats.h
+        perf/presentationstats.cpp
+        perf/presentationstats.h
+        perf/presentationfeedback.cpp
+        perf/presentationfeedback.h
     QML_FILES
         qml/Main.qml
 )
@@ -62,6 +66,43 @@ target_link_libraries(uqnotes_core PUBLIC
     PkgConfig::QPDF
     ink_stroke_modeler
 )
+
+# Задержка «событие -> показ» по wp_presentation (ink-beauty-pass, D1). Только
+# для замера и только на Wayland: без wayland-client, протокола или
+# Qt6::GuiPrivate приложение собирается как раньше, а PresentationFeedback
+# тихо возвращает nullptr.
+pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
+pkg_get_variable(UQ_WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+pkg_get_variable(UQ_WAYLAND_SCANNER wayland-scanner wayland_scanner)
+set(UQ_PRESENTATION_XML
+    "${UQ_WAYLAND_PROTOCOLS_DIR}/stable/presentation-time/presentation-time.xml")
+if(UQ_WP_PRESENTATION AND WAYLAND_CLIENT_FOUND AND UQ_WAYLAND_SCANNER
+   AND EXISTS "${UQ_PRESENTATION_XML}" AND TARGET Qt6::GuiPrivate)
+    set(UQ_WAYLAND_GEN ${CMAKE_CURRENT_BINARY_DIR}/wayland)
+    file(MAKE_DIRECTORY ${UQ_WAYLAND_GEN})
+    add_custom_command(
+        OUTPUT ${UQ_WAYLAND_GEN}/presentation-time-client-protocol.h
+               ${UQ_WAYLAND_GEN}/presentation-time-protocol.c
+        COMMAND ${UQ_WAYLAND_SCANNER} client-header ${UQ_PRESENTATION_XML}
+                ${UQ_WAYLAND_GEN}/presentation-time-client-protocol.h
+        COMMAND ${UQ_WAYLAND_SCANNER} private-code ${UQ_PRESENTATION_XML}
+                ${UQ_WAYLAND_GEN}/presentation-time-protocol.c
+        DEPENDS ${UQ_PRESENTATION_XML}
+        COMMENT "Generating wp_presentation client code"
+        VERBATIM)
+    # Код протокола - отдельной объектной библиотекой: libqpdf.pc кладёт в
+    # флаги -std=c++20, и через uqnotes_core он попал бы в компиляцию C.
+    add_library(uq_wp_presentation_protocol OBJECT
+        ${UQ_WAYLAND_GEN}/presentation-time-protocol.c)
+    target_link_libraries(uq_wp_presentation_protocol PRIVATE PkgConfig::WAYLAND_CLIENT)
+    target_sources(uqnotes_core PRIVATE
+        ${UQ_WAYLAND_GEN}/presentation-time-client-protocol.h
+        $<TARGET_OBJECTS:uq_wp_presentation_protocol>)
+    target_include_directories(uqnotes_core PRIVATE ${UQ_WAYLAND_GEN})
+    target_link_libraries(uqnotes_core PRIVATE PkgConfig::WAYLAND_CLIENT Qt6::GuiPrivate)
+    target_compile_definitions(uqnotes_core PRIVATE UQ_HAVE_WP_PRESENTATION)
+    message(STATUS "uq-notes: замер задержки до показа (wp_presentation) включён")
+endif()
 
 qt_add_executable(uq-notes main.cpp)
 target_link_libraries(uq-notes PRIVATE uqnotes_core uqnotes_coreplugin)

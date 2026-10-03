@@ -9,6 +9,8 @@
 
 #include <atomic>
 
+class PresentationFeedback;
+
 // Инструментация кадров. Бюджеты плавности из canvas-view и латентности из
 // ink-input сформулированы в спеке как проверяемые требования, поэтому измерять
 // их надо изнутри приложения, а не на глаз.
@@ -20,6 +22,9 @@
 //     Отсчёт идёт от метки времени события (QInputEvent::timestamp()), а не
 //     от момента обработки: иначе в замер не попадает доставка события от
 //     композитора (design.md, D1).
+//
+// При UQ_FRAME_LOG на Wayland к этому добавляется задержка до показа кадра на
+// экране (PresentationFeedback): frameSwapped - ещё не фотон.
 class FrameStats : public QObject
 {
     Q_OBJECT
@@ -134,4 +139,8 @@ private:
     QTimer *m_logTimer = nullptr;
 
     int m_foreignInputStamps = 0;
+    // Задержка до показа: только при UQ_FRAME_LOG, создаётся на первом
+    // показанном кадре, когда у окна уже есть wl_surface.
+    PresentationFeedback *m_presentation = nullptr;
+    bool m_presentationTried = false;
 };

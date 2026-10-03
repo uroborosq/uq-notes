@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
-project(uq-notes VERSION 0.7.0 LANGUAGES CXX)
+# C - только для кода протокола wp_presentation, который генерирует
+# wayland-scanner (src/CMakeLists.txt).
+project(uq-notes VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +17,15 @@ option(UQ_BUILD_TESTS "Build the test suite" ON)
 # Сценарный ввод и снимки экрана: нужны для замеров и проверки сценариев без
 # человека у экрана. В пакет не входят.
 option(UQ_DIAGNOSTICS "Build scripted-input and screenshot hooks" ON)
+# Задержка до показа кадра (wp_presentation, ink-beauty-pass D1). Работает
+# только при UQ_FRAME_LOG на Wayland; OFF собирает заглушку - так проверяется
+# сборка без wayland-client.
+option(UQ_WP_PRESENTATION "Build the wp_presentation latency probe if wayland-client is available" ON)
+if(UQ_WP_PRESENTATION)
+    # Здесь, а не в src/: импортированные цели GuiPrivate (XKB::XKB) видны
+    # только в каталоге find_package и ниже, а тесты линкуют uqnotes_core.
+    find_package(Qt6 QUIET COMPONENTS GuiPrivate)
+endif()
 # Офлайн-стенд сравнения конвейеров чернил (tools/stroke-lab): метрики, по
 # которым принимаются решения ink-beauty-pass. В пакет не входит, поэтому по
 # умолчанию выключен; можно собрать и отдельно: cmake -S tools/stroke-lab.

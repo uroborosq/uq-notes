@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include "presentationfeedback.h"
+
 namespace {
 constexpr int kMaxSamples = 4096;
 // Окно правдоподобия метки события относительно момента обработки, мс.
@@ -34,8 +36,15 @@ FrameStats::FrameStats(QObject *parent)
     if (qEnvironmentVariableIsSet("UQ_FRAME_LOG")) {
         m_logTimer = new QTimer(this);
         m_logTimer->setInterval(1000);
-        connect(m_logTimer, &QTimer::timeout, this,
-                [this] { QTextStream(stdout) << "[frames] " << summary() << Qt::endl; });
+        connect(m_logTimer, &QTimer::timeout, this, [this] {
+            QTextStream(stdout) << "[frames] " << summary() << Qt::endl;
+            if (m_presentation) {
+                m_presentation->dispatchPending();
+                const PresentationSummary present = m_presentation->takeSummary();
+                if (!present.isEmpty())
+                    QTextStream(stdout) << "[present] " << present.toString() << Qt::endl;
+            }
+        });
         m_logTimer->start();
     }
 }
@@ -46,6 +55,10 @@ void FrameStats::setWindow(QQuickWindow *window)
         return;
     if (m_window)
         m_window->disconnect(this);
+    // Подписка на показ привязана к wl_surface прежнего окна.
+    delete m_presentation;
+    m_presentation = nullptr;
+    m_presentationTried = false;
 
     m_window = window;
 
@@ -129,6 +142,8 @@ void FrameStats::markInput(qreal eventTimeSeconds)
     // нему, иначе поток промежуточных событий занижал бы результат.
     qint64 expected = 0;
     m_pendingInputNs.compare_exchange_strong(expected, input, std::memory_order_relaxed);
+    if (m_presentation)
+        m_presentation->noteInput(input);
 }
 
 void FrameStats::onBeforeRendering()
@@ -152,6 +167,13 @@ void FrameStats::onFrameSwapped()
         return;
 
     const qint64 now = nowNs();
+    if (m_logTimer && !m_presentationTried && m_window) {
+        // Первый показанный кадр: wl_surface у окна уже есть.
+        m_presentationTried = true;
+        m_presentation = PresentationFeedback::create(m_window, this);
+    }
+    if (m_presentation)
+        m_presentation->dispatchPending();
 
     if (const qint64 input = m_pendingInputNs.exchange(0, std::memory_order_relaxed)) {
         m_lastLatencyMs = (now - input) / 1e6;
