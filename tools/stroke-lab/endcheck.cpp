@@ -131,23 +131,27 @@ int runEndCheck(const std::vector<const VariantInfo *> &variants, double width)
                 step = std::max(step, std::abs(w1 - w0) / std::max(w0, 1e-9));
                 arc += std::hypot(c[i].pos.x() - c[i - 1].pos.x(), c[i].pos.y() - c[i - 1].pos.y());
             }
-            // Торец: вершины геометрии за концом осевой.
+            // Торцы: вершины геометрии за концом и перед началом осевой (прямая
+            // идёт по +x) против окружности радиуса полутолщины; в таблице -
+            // худший из двух.
             const Geometry g = v->geometry();
-            const QPointF end = c.back().pos;
-            const double r = c.back().width / 2.0;
-            double capDev = 0.0;
-            int beyond = 0;
             std::vector<QPointF> verts = g.vertices;
             for (const QPolygonF &poly : g.polygons)
                 verts.insert(verts.end(), poly.begin(), poly.end());
-            for (const QPointF &p : verts) {
-                if (p.x() <= end.x() + 1e-6)
-                    continue;
-                ++beyond;
-                capDev = std::max(capDev, std::abs(std::hypot(p.x() - end.x(), p.y() - end.y()) - r) / r);
-            }
-            if (beyond == 0)
-                capDev = 1.0; // плоский торец: ничего за концом
+            const auto capDeviation = [&verts](const CenterPoint &cap, double dir) {
+                const QPointF o = cap.pos;
+                const double r = cap.width / 2.0;
+                double dev = 0.0;
+                int beyond = 0;
+                for (const QPointF &p : verts) {
+                    if (dir * (p.x() - o.x()) <= 1e-6)
+                        continue;
+                    ++beyond;
+                    dev = std::max(dev, std::abs(std::hypot(p.x() - o.x(), p.y() - o.y()) - r) / r);
+                }
+                return beyond == 0 ? 1.0 : dev; // плоский торец: за ним ничего
+            };
+            const double capDev = std::max(capDeviation(c.front(), -1.0), capDeviation(c.back(), 1.0));
             std::printf("| %s | %.0f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f | %.3f |\n", info->name.c_str(),
                         speed, entry, entryRef, exitLen, exitRef, exitLen > 0 ? entry / exitLen : 0.0, step,
                         capDev);

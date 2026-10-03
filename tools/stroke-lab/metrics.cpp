@@ -93,20 +93,24 @@ private:
     std::unordered_map<long long, std::vector<int>> m_grid;
 };
 
+// Набор значений метрики. Пустой набор даёт NaN (в JSON - null, сводка его
+// пропускает): ноль от сэмпла, где мерить нечего (касание короче профиля,
+// перо медленнее порога), иначе разбавлял бы средние по корпусу.
 struct Stats
 {
+    static constexpr double kNone = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> v;
     void add(double x)
     {
         if (std::isfinite(x))
             v.push_back(x);
     }
-    double mean() const { return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size(); }
-    double max() const { return v.empty() ? 0.0 : *std::max_element(v.begin(), v.end()); }
+    double mean() const { return v.empty() ? kNone : std::accumulate(v.begin(), v.end(), 0.0) / v.size(); }
+    double max() const { return v.empty() ? kNone : *std::max_element(v.begin(), v.end()); }
     double rms() const
     {
         if (v.empty())
-            return 0.0;
+            return kNone;
         double s = 0;
         for (double x : v)
             s += x * x;
@@ -115,7 +119,7 @@ struct Stats
     double pct(double q) const
     {
         if (v.empty())
-            return 0.0;
+            return kNone;
         std::vector<double> c = v;
         const size_t k = std::min(c.size() - 1, size_t(std::floor(q * (c.size() - 1) + 0.5)));
         std::nth_element(c.begin(), c.begin() + long(k), c.end());
@@ -509,7 +513,7 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
     // kEndZone px дуги эталона и в теле; наибольший скачок толщины на 1 px
     // дуги; коэффициент вариации толщины в теле.
     Stats widthStartErr, widthEndErr, widthBodyErr, widthCv, widthCvGt;
-    double widthStepMax = 0.0, widthStepMaxGt = 0.0;
+    double widthStepMax = Stats::kNone, widthStepMaxGt = Stats::kNone;
     int facetCount = 0;
     int mutations = 0;
     int finalVertices = 0;
@@ -543,8 +547,18 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
                 gtPressure.push_back(stroke.truth.pressure[i]);
             }
         }
-        if (gt.size() < 2)
-            gt.push_back(gt.empty() ? stroke.truth.p.front() : gt.back() + QPointF(1e-3, 0));
+        // Касание без движения (путь эталона < 0.02 px): вторая точка рядом,
+        // с тем же временем и давлением - массивы эталона одной длины.
+        if (gt.empty()) {
+            gt.push_back(stroke.truth.p.front());
+            gtTime.push_back(stroke.truth.t.front());
+            gtPressure.push_back(stroke.truth.pressure.front());
+        }
+        if (gt.size() < 2) {
+            gt.push_back(gt.back() + QPointF(1e-3, 0));
+            gtTime.push_back(gtTime.back());
+            gtPressure.push_back(gtPressure.back());
+        }
         const PolylineIndex gtIndex(gt);
 
         std::vector<QPointF> center;
@@ -751,13 +765,13 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
             }
             resample(cp, cw, 1.0, u, w);
             for (size_t i = 1; i < w.size(); ++i)
-                widthStepMax = std::max(widthStepMax, std::abs(w[i] - w[i - 1]));
+                widthStepMax = std::fmax(widthStepMax, std::abs(w[i] - w[i - 1]));
             std::vector<double> gw;
             for (double p : gtPressure)
                 gw.push_back(truthWidthPx(p, scale, options));
             resample(gt, gw, 1.0, u, w);
             for (size_t i = 1; i < w.size(); ++i)
-                widthStepMaxGt = std::max(widthStepMaxGt, std::abs(w[i] - w[i - 1]));
+                widthStepMaxGt = std::fmax(widthStepMaxGt, std::abs(w[i] - w[i - 1]));
         }
 
         // 6б. Следование толщины за давлением (exp/dry-refine).
@@ -934,13 +948,13 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
     m["facet_max_deg"] = r(facet.max());
     m["facet_p99_deg"] = r(facet.pct(0.99));
     m["turn_max_deg"] = r(turn.max());
-    m["curvature_tv_per100px"] = r(curvLen > 0 ? curvTv / curvLen * 100.0 : 0.0);
-    m["curvature_tv_truth_per100px"] = r(curvLenGt > 0 ? curvTvGt / curvLenGt * 100.0 : 0.0);
+    m["curvature_tv_per100px"] = r(curvLen > 0 ? curvTv / curvLen * 100.0 : Stats::kNone);
+    m["curvature_tv_truth_per100px"] = r(curvLenGt > 0 ? curvTvGt / curvLenGt * 100.0 : Stats::kNone);
     {
         // Сумма |dk| в радианах на 1 px шага, на 100 px длины. Отношение - с
         // добавкой 1, иначе на прямой (у эталона почти 0) оно бесконечно.
-        const double tv = curvLen > 0 ? curvTv / curvLen * 100.0 : 0.0;
-        const double tvGt = curvLenGt > 0 ? curvTvGt / curvLenGt * 100.0 : 0.0;
+        const double tv = curvLen > 0 ? curvTv / curvLen * 100.0 : Stats::kNone;
+        const double tvGt = curvLenGt > 0 ? curvTvGt / curvLenGt * 100.0 : Stats::kNone;
         m["curvature_tv_excess_per100px"] = r(tv - tvGt);
         m["curvature_tv_ratio"] = r((tv + 1.0) / (tvGt + 1.0));
     }
@@ -953,8 +967,8 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
     }
     if (sample.hasTag("closed"))
         m["closed_area_ratio"] = r(areaRatio);
-    m["width_tv_per100px"] = r(widthLen > 0 ? widthTv / widthLen * 100.0 : 0.0);
-    m["width_tv_truth_per100px"] = r(widthLenGt > 0 ? widthTvGt / widthLenGt * 100.0 : 0.0);
+    m["width_tv_per100px"] = r(widthLen > 0 ? widthTv / widthLen * 100.0 : Stats::kNone);
+    m["width_tv_truth_per100px"] = r(widthLenGt > 0 ? widthTvGt / widthLenGt * 100.0 : Stats::kNone);
     m["width_hf_rms_px"] = r(widthHf.rms(), 4);
     m["width_mean_ratio"] = r(widthCount > 0 && widthSumGt > 0
                                   ? (widthSum / widthCount) / (widthSumGt / widthCountGt)

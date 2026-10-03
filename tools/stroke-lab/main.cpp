@@ -309,7 +309,8 @@ void rasterMetrics(const QImage &app, const QImage &reference, const QColor &pap
     std::sort(errors.begin(), errors.end());
     m[prefix + QStringLiteral("_rms")] = std::sqrt(sq / errors.size());
     m[prefix + QStringLiteral("_p99")] = errors[size_t(0.99 * (errors.size() - 1))];
-    m[prefix + QStringLiteral("_ink_ratio")] = sumRef > 0 ? sumApp / sumRef : 0.0;
+    if (sumRef > 0)
+        m[prefix + QStringLiteral("_ink_ratio")] = sumApp / sumRef;
 }
 
 } // namespace
@@ -561,8 +562,10 @@ int main(int argc, char **argv)
                 double acc = c.agg == Column::Max ? -1e300 : 0.0;
                 int count = 0;
                 for (const Sample *s : samples) {
+                    // Нет значения (null: мерить было нечего) - сэмпл в
+                    // агрегат не входит.
                     const QJsonValue value = results[v->name][scale][s->id].value(c.key);
-                    if (!value.isDouble())
+                    if (!value.isDouble() || !std::isfinite(value.toDouble()))
                         continue;
                     const double x = value.toDouble();
                     if (c.agg == Column::Max)

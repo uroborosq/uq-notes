@@ -484,6 +484,7 @@ dde381e5072110f8df5deab4e1b0becd7be33f82b7d5fc66d87d580f430671f3  tools/stroke-l
 c5696238346a603c1c74e85f449a12dda153eb6780bf23dd853aa24cbcab4d9d  tools/stroke-lab/variants/baseline.cpp
 EOF
 ```
+  После рецензии (коммит «Стенд: пустые средние - null, cap_dev по обоим торцам», следующий за 5a8b707) metrics.cpp, main.cpp и endcheck.cpp исправлены: пустые средние пишутся null, cap_dev проверяет оба торца; суммы выше - для состояния до этой правки.
   Ожидание: все `OK`. Если какой-то файл не совпал - разрешение конфликта ушло не туда; сравнить с эталонным диффом `git diff HEAD -- tools/stroke-lab/<файл>` против описания шагов 1.7-1.14 (рядом с планом лежит `openspec/changes/ink-beauty-pass/stroke-lab.patch` - тот же итог одним диффом от 720b497, включая `CMakeLists.txt` и `README.md` стенда; накладывается `git apply` поверх 1.5, если рецепт слияния разошёлся).
 ```sh
 cmake --build build -j$(nproc) --target stroke-lab stroke-lab-aabench
