@@ -6727,7 +6727,7 @@ provisional))`: к точке дописывается та же пиковая 
 
   ```sh
   rm -rf /tmp/uq-step2
-  ./build/tools/stroke-lab/stroke-lab --variants baseline --out /tmp/uq-step2
+  ./build/tools/stroke-lab/stroke-lab --variants baseline --min-width-factor 0.08 --out /tmp/uq-step2
   sed -n '/### scale 1/,/### scale 2.5/p' /tmp/uq-step2/summary.md
   python3 -c "import json; [print(s['sample'], s['scale'], s['centerline_points']) for s in json.load(open('/tmp/uq-step2/baseline/metrics.json'))['samples'] if s['sample'] == 'dots_taps']"
   ```

@@ -411,7 +411,8 @@ int main(int argc, char **argv)
         }
     }
     if (parser.isSet(endOpt))
-        return runEndCheck(chosen, parser.value(widthOpt).toDouble());
+        return runEndCheck(chosen, parser.value(widthOpt).toDouble(),
+                           parser.value(minWidthOpt).toDouble());
 
     const QStringList samplePatterns = parser.value(samplesOpt).split(',', Qt::SkipEmptyParts);
     std::vector<const Sample *> samples;

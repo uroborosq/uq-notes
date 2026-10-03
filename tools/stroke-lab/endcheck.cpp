@@ -8,8 +8,9 @@
 // Для каждого варианта:
 //  entry_px  - длина дуги от начала, пока толщина не дойдёт до 90% плато;
 //  exit_px   - то же от конца;
-//  entry_ref / exit_ref - то же для эталона: закон 0.25 + 0.75 p на
-//              настоящем давлении (без фильтра);
+//  entry_ref / exit_ref - то же для эталона: закон w·(f + (1−f)·p) на
+//              настоящем давлении (без фильтра), f - --min-width-factor
+//              (0.25 - Legacy, 0.08 - Tapered);
 //  step_end  - наибольший относительный скачок толщины между соседними
 //              точками осевой на последних 3 толщинах плато;
 //  cap_dev   - отклонение вершин геометрии за концом штриха от окружности
@@ -95,9 +96,12 @@ double arcUntil(const std::vector<CenterPoint> &c, double threshold, bool fromEn
 
 } // namespace
 
-int runEndCheck(const std::vector<const VariantInfo *> &variants, double width)
+int runEndCheck(const std::vector<const VariantInfo *> &variants, double width,
+                double minWidthFactor)
 {
-    std::printf("\n## endcheck: концы штриха на синтетике (ширина %.2f pt, масштаб 1)\n\n", width);
+    std::printf("\n## endcheck: концы штриха на синтетике (ширина %.2f pt, масштаб 1, "
+                "эталон w·(%.2f + %.2f·p))\n\n",
+                width, minWidthFactor, 1.0 - minWidthFactor);
     std::printf("| variant | v px/s | entry px | entry ref | exit px | exit ref | entry/exit | step_end | cap_dev |\n");
     std::printf("|---|---|---|---|---|---|---|---|---|\n");
     for (const VariantInfo *info : variants) {
@@ -117,10 +121,12 @@ int runEndCheck(const std::vector<const VariantInfo *> &variants, double width)
             const double plateau = c[c.size() / 2].width;
             const double entry = arcUntil(c, 0.9 * plateau, false);
             const double exitLen = arcUntil(c, 0.9 * plateau, true);
-            // Эталон: закон приложения на настоящем давлении.
+            // Эталон: закон толщины --min-width-factor на настоящем давлении.
             std::vector<CenterPoint> ref;
             for (const InkPoint &e : s.events)
-                ref.push_back({e.position, width * (0.25 + 0.75 * e.pressure), e.pressure, e.timeSeconds});
+                ref.push_back({e.position,
+                               width * (minWidthFactor + (1.0 - minWidthFactor) * e.pressure),
+                               e.pressure, e.timeSeconds});
             const double refPlateau = ref[ref.size() / 2].width;
             const double entryRef = arcUntil(ref, 0.9 * refPlateau, false);
             const double exitRef = arcUntil(ref, 0.9 * refPlateau, true);

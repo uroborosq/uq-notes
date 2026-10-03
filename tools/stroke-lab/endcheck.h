@@ -6,5 +6,8 @@
 
 namespace lab {
 // Синтетика касания и отрыва для сравнения концов штриха; печатает таблицы.
-int runEndCheck(const std::vector<const VariantInfo *> &variants, double width);
+// minWidthFactor - нижний предел эталонного закона w·(f + (1−f)·p), как
+// --min-width-factor у метрик корпуса.
+int runEndCheck(const std::vector<const VariantInfo *> &variants, double width,
+                double minWidthFactor);
 } // namespace lab

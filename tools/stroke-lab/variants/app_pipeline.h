@@ -86,7 +86,7 @@ public:
         return g;
     }
 
-private:
+protected:
     CenterPoint toCenter(const InkPoint &p) const
     {
         // halfWidthAt зависит только от толщины и закона, а их задал begin():
