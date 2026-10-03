@@ -6696,7 +6696,7 @@ provisional))`: к точке дописывается та же пиковая 
 **Files:**
 - Modify: `CMakeLists.txt`, `packaging/PKGBUILD`
 
-- [ ] 9.1 **Полный прогон тестов.**
+- [x] 9.1 **Полный прогон тестов.**
 
   ```sh
   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUQ_BUILD_STROKE_LAB=ON
@@ -6708,7 +6708,7 @@ provisional))`: к точке дописывается та же пиковая 
   SKIP). Отдельно убедиться, что `tst_export` зелёный - это гейт шага 2 из
   design.md D9: `ctest --test-dir build -R tst_export --output-on-failure`.
 
-- [ ] 9.2 **Гейт `--endcheck`: торцы и касание.**
+- [x] 9.2 **Гейт `--endcheck`: торцы и касание.**
 
   ```sh
   ./build/tools/stroke-lab/stroke-lab --endcheck --variants baseline --width 2.4
@@ -6723,7 +6723,7 @@ provisional))`: к точке дописывается та же пиковая 
   проверить, что `geometry()` варианта `baseline` строится `tessellate`, а не
   старым кодом стенда.
 
-- [ ] 9.3 **Прогон корпуса стенда и сверка с design.md.**
+- [x] 9.3 **Прогон корпуса стенда и сверка с design.md.**
 
   ```sh
   rm -rf /tmp/uq-step2
@@ -6746,7 +6746,7 @@ provisional))`: к точке дописывается та же пиковая 
   одно не отброшено как задев. Глазами: `/tmp/uq-step2/compare/dots_taps_s2.5.png`
   - круглые точки, `/tmp/uq-step2/compare/corner_N_s2.5.png` - круглые концы.
 
-- [ ] 9.4 **Версия 0.9.0.** `CMakeLists.txt`, строка 2: `project(uq-notes VERSION 0.8.0 LANGUAGES CXX)`
+- [x] 9.4 **Версия 0.9.0.** `CMakeLists.txt`, строка 2: `project(uq-notes VERSION 0.8.0 LANGUAGES CXX)`
   → `project(uq-notes VERSION 0.9.0 LANGUAGES CXX)`. `packaging/PKGBUILD`:
   `pkgver=0.8.0` → `pkgver=0.9.0` (`pkgrel=1` не меняется).
 
@@ -6757,7 +6757,7 @@ provisional))`: к точке дописывается та же пиковая 
 
   Ожидается: обе строки найдены, `tst_buildenv` зелёный.
 
-- [ ] 9.5 **Финальный коммит шага 2.** Числа в абзаце про D6 - из
+- [x] 9.5 **Финальный коммит шага 2.** Числа в абзаце про D6 - из
   `/tmp/uq-gate-d6/gate.txt` (ниже - прогона в scratchpad):
 
   ```sh
