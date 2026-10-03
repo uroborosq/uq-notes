@@ -332,6 +332,11 @@ qreal StrokeSampler::pressureAt(qreal time) const
         const InkPoint &a = m_rawHistory[i - 1];
         const InkPoint &b = m_rawHistory[i];
         if (time >= a.timeSeconds) {
+            // Отсчёт без давления (-1) с настоящим давлением не смешивается,
+            // как в lerpPressure: смесь дала бы отрицательное давление или
+            // тонкое место.
+            if (!a.hasPressure() || !b.hasPressure())
+                return b.pressure;
             const qreal span = b.timeSeconds - a.timeSeconds;
             const qreal u = span > 0.0 ? (time - a.timeSeconds) / span : 1.0;
             return a.pressure + (b.pressure - a.pressure) * u;
