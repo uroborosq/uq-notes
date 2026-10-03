@@ -692,6 +692,18 @@ Sample toothSample()
         maxX = std::max(maxX, p.position.x());
         maxY = std::max(maxY, p.position.y());
     }
+    // Вершины зубца - эталонные, по тому же правилу, что collectCorners:
+    // поворот эталона круче 45°. Это вершина и оба основания зубца. Иначе
+    // настоящие повороты зубца считались бы ложными остриями, и сумма
+    // false_cusp_count по корпусу поощряла бы вариант, сглаживающий зубец.
+    for (int i = 1; i + 1 < tooth.points.size(); ++i) {
+        const QPointF a = tooth.points[i].position - tooth.points[i - 1].position;
+        const QPointF b = tooth.points[i + 1].position - tooth.points[i].position;
+        const double turn = std::abs(std::atan2(a.x() * b.y() - a.y() * b.x(),
+                                                a.x() * b.x() + a.y() * b.y()));
+        if (turn > M_PI / 4)
+            sample.corners.push_back(tooth.points[i].position);
+    }
     sample.strokes.push_back(std::move(stroke));
     sample.toothApex = tooth.apex;
     sample.toothAmplitude = tooth.amplitude;

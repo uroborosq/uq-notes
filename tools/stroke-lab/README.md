@@ -205,6 +205,8 @@ truth/<sample>_s<scale>.png    эталон 1:1
 | `turn_max_deg` | наибольший поворот в одной вершине там же |
 | `curvature_tv_per100px`, `_truth_`, `_excess_`, `_ratio` | Σ|Δκ| на равномерной нарезке 1 px (κ - поворот на шаг), на 100 px длины; excess = вариант − эталон, ratio = (tv+1)/(tv_gt+1) |
 | `corner_dist_mean/max_px` | от эталонной вершины угла до осевой; `STROKE_LAB_DEBUG_CORNERS=1` печатает каждую вершину |
+| `false_cusp_count` | ложные острия (гейт D6): вершины осевой с поворотом круче 45° дальше 2 px от любой эталонной вершины угла, без 2 px у концов; `STROKE_LAB_DEBUG_CUSPS=1` печатает каждое |
+| `tooth_peak_ratio` | для `tooth_240`: наибольший подъём осевой над прямой в пределах 6 px от вершины зубца / высота зубца (3 px); `tst_strokesampler::toothShorterThanFrameSurvives` требует ≥ 0.5. Вершина и основания зубца - эталонные вершины углов (поворот > 45°), его настоящие повороты в ложные острия не идут |
 | `shape_dev_mean_pct`, `shape_hausdorff_pct` | для `small`: отклонение / x-height, % |
 | `closed_area_ratio` | для `closed` (буквы o): площадь осевой / площадь эталона |
 | `width_tv_per100px` (+`_truth_`), `width_hf_rms_px`, `width_mean_ratio` | толщина вдоль дуги (1 px): Σ|Δw|, ВЧ-остаток после скользящего среднего 9 px, средняя толщина / эталонная |

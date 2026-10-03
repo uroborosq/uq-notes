@@ -24,7 +24,8 @@ def check(name, condition, detail):
     passed = passed and condition
 
 
-# Сверка копии сэмплера с приложением: без D6 осевая та же до бита.
+# Сверка копии сэмплера с приложением: без D6 осевая та же до округления
+# метрик (3 знака).
 keys = ['centerline_dev_mean_px', 'centerline_dev_max_px', 'facet_count_2deg',
         'curvature_tv_excess_per100px', 'corner_dist_max_px', 'settled_mutations',
         'false_cusp_count', 'centerline_points']
@@ -32,16 +33,22 @@ diff = [(k, key) for k in base for key in keys if base[k].get(key) != per['d6-co
 check('d6-copy совпадает с baseline', not diff,
       f'расхождений {len(diff)}' + (f', первое {diff[0]}' if diff else ''))
 
-# Вершина острия в максимуме - по корпусу без острий без стоянки: у тех свой
-# критерий ниже.
+# Вершина острия в максимуме - по корпусу без острий без стоянки и без зубца:
+# у тех свои критерии ниже (у зубца вершины эталонные только ради ложных
+# острий, его срез меряет tooth_peak_ratio).
+def own_criterion(sample):
+    return 'nostop' in sample or sample == 'tooth_240'
+
+
 for scale in scales:
     b = max(s['corner_dist_max_px'] for k, s in base.items()
-            if k[1] == scale and s.get('corner_dist_max_px') is not None and 'nostop' not in k[0])
+            if k[1] == scale and s.get('corner_dist_max_px') is not None and not own_criterion(k[0]))
     d = max(s['corner_dist_max_px'] for k, s in cand.items()
-            if k[1] == scale and s.get('corner_dist_max_px') is not None and 'nostop' not in k[0])
+            if k[1] == scale and s.get('corner_dist_max_px') is not None and not own_criterion(k[0]))
     check(f'x{scale:g}: вершина острия в максимуме <= 0.6 px', d <= 0.6, f'{b} -> {d}')
 
-for tag in ('s1', 's2.5'):
+# Ключи сводки по масштабам (s1, s2.5, ...) - из самой сводки.
+for tag in sorted(summary['baseline'], key=lambda t: float(t[1:])):
     b = summary['baseline'][tag]
     d = summary[candidate][tag]
     for key, title, limit in (
