@@ -192,7 +192,12 @@ private slots:
         QVERIFY2(!m_stats->isLogging(),
                  "тест должен идти без UQ_FRAME_LOG, иначе он проверяет другой режим");
         m_canvas->update();
+        // Решение «создавать ли пробу» принимается на показанном кадре, поэтому
+        // кадры должны идти, иначе тест ничего не проверяет. create() вне
+        // Wayland и так вернёт nullptr, поэтому проверяется сама попытка.
+        QTRY_VERIFY(m_stats->frameCount() > 0);
         QTest::qWait(300);
+        QVERIFY(!m_stats->presentationProbeAttempted());
         QVERIFY(!m_stats->findChild<PresentationFeedback *>());
     }
 };

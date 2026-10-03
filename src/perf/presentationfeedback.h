@@ -4,7 +4,6 @@
 #include <QObject>
 #include <QSet>
 
-#include <atomic>
 #include <cstdint>
 
 #include "presentationstats.h"
@@ -27,6 +26,9 @@ struct wp_presentation_feedback;
 // без явного запроса замер не стоит ничего). На любой другой платформе, при
 // композиторе без wp_presentation и в сборке без wayland-client create()
 // возвращает nullptr, и FrameStats работает как раньше.
+//
+// Объект нельзя уничтожать, пока окно ещё рисует: смена окна у FrameStats
+// посреди работы рендера не поддерживается.
 //
 // Потоки. noteInput() и dispatchPending() - поток GUI. Кадр собирается на
 // потоке рендера: в beforeSynchronizing (поток GUI в этот момент стоит)
@@ -65,6 +67,7 @@ private:
     bool init();
     void onBeforeSynchronizing();
     void onAfterRendering();
+    void onAfterFrameEnd();
     void finish(Request *request);
 
     static void registryGlobal(void *data, wl_registry *registry, uint32_t name,
@@ -88,11 +91,7 @@ private:
     wl_surface *m_surface = nullptr;
     uint32_t m_clockId = 1; // CLOCK_MONOTONIC, пока композитор не сказал иного
 
-    // Поток GUI пишет, поток рендера забирает на синхронизации.
-    std::atomic<qint64> m_pendingOldestNs{0};
-    std::atomic<qint64> m_pendingNewestNs{0};
-    // Только поток рендера: от синхронизации до afterRendering того же кадра.
-    FrameInputs m_frameInputs;
+    FrameInputTracker m_inputs; // события кадра, см. presentationstats.h
 
     QMutex m_mutex; // m_requests: создаются на потоке рендера, гаснут на GUI
     QSet<Request *> m_requests;

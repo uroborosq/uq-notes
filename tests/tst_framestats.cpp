@@ -136,6 +136,79 @@ private slots:
         QVERIFY(summary.toString().contains(QStringLiteral("clock mismatch 1")));
     }
 
+    // Чужая метка не идёт в задержку до показа: запасное «сейчас» занизило бы
+    // [present]. Латентность до swap по-прежнему считается от обработки.
+    void foreignStampIsNotAPresentationSample()
+    {
+        const qint64 nowMs = 5'000'123;
+        const qint64 now = nowMs * kMs + 456'789;
+
+        const FrameStats::InputMark own =
+            FrameStats::classifyInput(waylandStampSeconds(nowMs - 7), now);
+        QVERIFY(!own.foreign);
+        QCOMPARE(own.latencyFromNs, (nowMs - 7) * kMs);
+        QCOMPARE(own.presentationNs, (nowMs - 7) * kMs);
+
+        const FrameStats::InputMark foreign =
+            FrameStats::classifyInput(waylandStampSeconds(nowMs - 60'000), now);
+        QVERIFY(foreign.foreign);
+        QCOMPARE(foreign.latencyFromNs, now);
+        QCOMPARE(foreign.presentationNs, qint64(0));
+
+        // Без метки (сценарный ввод) - от обработки, и это не чужая метка.
+        const FrameStats::InputMark none = FrameStats::classifyInput(-1.0, now);
+        QVERIFY(!none.foreign);
+        QCOMPARE(none.latencyFromNs, now);
+        QCOMPARE(none.presentationNs, now);
+    }
+
+    // Огромная метка (сбой драйвера, чужие часы) - чужая, без переполнения
+    // в llround.
+    void hugeStampIsForeign()
+    {
+        const qint64 now = 5'000'123 * kMs;
+        QCOMPARE(FrameStats::eventTimeToNs(1e300, now), qint64(-1));
+        QCOMPARE(FrameStats::eventTimeToNs(qreal(1ULL << 63), now), qint64(-1));
+        QCOMPARE(FrameStats::eventTimeToNs(qQNaN(), now), qint64(-1));
+
+        FrameStats stats;
+        stats.markInput(1e300);
+        QCOMPARE(stats.foreignInputStamps(), 1);
+    }
+
+    // Кадр забирает события, отмеченные до синхронизации; отмеченное позже -
+    // следующему кадру.
+    void trackerSplitsInputsAtSync()
+    {
+        FrameInputTracker tracker;
+        tracker.noteInput(10 * kMs);
+        tracker.noteInput(12 * kMs);
+        tracker.beginFrame();
+        tracker.noteInput(15 * kMs); // после синхронизации
+        const FrameInputs first = tracker.takeForRenderedFrame();
+        QCOMPARE(first.oldestNs, 10 * kMs);
+        QCOMPARE(first.newestNs, 12 * kMs);
+        QVERIFY(tracker.takeForRenderedFrame().isEmpty()); // кадр забирает один раз
+        tracker.endFrame();
+
+        tracker.beginFrame();
+        const FrameInputs second = tracker.takeForRenderedFrame();
+        QCOMPARE(second.oldestNs, 15 * kMs);
+        QCOMPARE(second.newestNs, 15 * kMs);
+    }
+
+    // Кадр закончился без отрисовки (beginFrame не удался, окно не готово) -
+    // его события не приписываются следующему кадру, который отрисуется без
+    // синхронизации.
+    void frameWithoutRenderDropsItsInputs()
+    {
+        FrameInputTracker tracker;
+        tracker.noteInput(10 * kMs);
+        tracker.beginFrame();
+        tracker.endFrame();
+        QVERIFY(tracker.takeForRenderedFrame().isEmpty());
+    }
+
 };
 
 QTEST_MAIN(TestFrameStats)

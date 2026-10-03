@@ -130,6 +130,8 @@ bool PresentationFeedback::init()
             &PresentationFeedback::onBeforeSynchronizing, Qt::DirectConnection);
     connect(m_window, &QQuickWindow::afterRendering, this,
             &PresentationFeedback::onAfterRendering, Qt::DirectConnection);
+    connect(m_window, &QQuickWindow::afterFrameEnd, this,
+            &PresentationFeedback::onAfterFrameEnd, Qt::DirectConnection);
     return true;
 #else
     return false;
@@ -138,45 +140,49 @@ bool PresentationFeedback::init()
 
 void PresentationFeedback::noteInput(qint64 eventNs)
 {
-    if (eventNs <= 0)
-        return;
-    qint64 expected = 0;
-    m_pendingOldestNs.compare_exchange_strong(expected, eventNs, std::memory_order_relaxed);
-    m_pendingNewestNs.store(eventNs, std::memory_order_relaxed);
+    m_inputs.noteInput(eventNs);
 }
 
 void PresentationFeedback::onBeforeSynchronizing()
 {
-    // Поток GUI стоит на синхронизации, поэтому всё, что он успел отметить,
-    // войдёт ровно в этот кадр, а отмеченное позже - в следующий.
-    m_frameInputs = FrameInputs();
-    m_frameInputs.add(m_pendingOldestNs.exchange(0, std::memory_order_relaxed));
-    m_frameInputs.add(m_pendingNewestNs.exchange(0, std::memory_order_relaxed));
+    m_inputs.beginFrame();
+}
+
+void PresentationFeedback::onAfterFrameEnd()
+{
+    m_inputs.endFrame();
 }
 
 void PresentationFeedback::onAfterRendering()
 {
+    const FrameInputs inputs = m_inputs.takeForRenderedFrame();
 #ifdef UQ_HAVE_WP_PRESENTATION
     // Кадры без ввода не заказываются: их задержка ничего не говорит о пере, а
     // лишний объект протокола на каждый кадр - лишняя работа композитора.
-    if (m_frameInputs.isEmpty())
+    if (inputs.isEmpty())
         return;
     auto *request = new Request;
     request->owner = this;
-    request->inputs = m_frameInputs;
-    m_frameInputs = FrameInputs();
-    // feedback относится к ближайшему wl_surface.commit, а его делает
-    // eglSwapBuffers сразу после этого сигнала. Ответ придёт не раньше показа
-    // кадра, то есть заведомо после add_listener ниже.
-    request->feedback = wp_presentation_feedback(m_presentation, m_surface);
+    request->inputs = inputs;
     static const wp_presentation_feedback_listener feedbackListener = {
         &PresentationFeedback::feedbackSyncOutput,
         &PresentationFeedback::feedbackPresented,
         &PresentationFeedback::feedbackDiscarded,
     };
-    wp_presentation_feedback_add_listener(request->feedback, &feedbackListener, request);
+    // Запрос регистрируется до того, как появится прокси, и под тем же
+    // мьютексом, что finish(): если поток GUI разберёт ответ сразу после
+    // add_listener (кадр закоммитил кто-то другой), finish() дождётся, пока
+    // запрос заполнен, и снимет его из m_requests, а не оставит там висячий
+    // указатель. Колбэк зовётся без мьютекса libwayland, так что взаимной
+    // блокировки нет.
     QMutexLocker lock(&m_mutex);
     m_requests.insert(request);
+    // feedback относится к ближайшему wl_surface.commit, а его делает
+    // eglSwapBuffers сразу после этого сигнала.
+    request->feedback = wp_presentation_feedback(m_presentation, m_surface);
+    wp_presentation_feedback_add_listener(request->feedback, &feedbackListener, request);
+#else
+    Q_UNUSED(inputs);
 #endif
 }
 
@@ -191,11 +197,10 @@ void PresentationFeedback::dispatchPending()
 void PresentationFeedback::finish(Request *request)
 {
 #ifdef UQ_HAVE_WP_PRESENTATION
+    // Сначала мьютекс: onAfterRendering() мог ещё не дописать request.
+    QMutexLocker lock(&m_mutex);
+    m_requests.remove(request);
     wp_presentation_feedback_destroy(request->feedback);
-    {
-        QMutexLocker lock(&m_mutex);
-        m_requests.remove(request);
-    }
     delete request;
 #else
     Q_UNUSED(request);

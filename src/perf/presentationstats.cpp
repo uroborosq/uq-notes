@@ -25,6 +25,31 @@ void FrameInputs::add(qint64 eventNs)
     newestNs = std::max(newestNs, eventNs);
 }
 
+void FrameInputTracker::noteInput(qint64 eventNs)
+{
+    if (eventNs <= 0)
+        return;
+    qint64 expected = 0;
+    m_pendingOldestNs.compare_exchange_strong(expected, eventNs, std::memory_order_relaxed);
+    m_pendingNewestNs.store(eventNs, std::memory_order_relaxed);
+}
+
+void FrameInputTracker::beginFrame()
+{
+    // Поток GUI стоит на синхронизации, поэтому всё, что он успел отметить,
+    // войдёт ровно в этот кадр, а отмеченное позже - в следующий.
+    m_frame = FrameInputs();
+    m_frame.add(m_pendingOldestNs.exchange(0, std::memory_order_relaxed));
+    m_frame.add(m_pendingNewestNs.exchange(0, std::memory_order_relaxed));
+}
+
+FrameInputs FrameInputTracker::takeForRenderedFrame()
+{
+    const FrameInputs frame = m_frame;
+    m_frame = FrameInputs();
+    return frame;
+}
+
 void PresentationStats::addPresented(const FrameInputs &inputs, qint64 presentedNs)
 {
     if (inputs.isEmpty())

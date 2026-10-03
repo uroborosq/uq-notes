@@ -98,6 +98,22 @@ public:
     // будущего (с запасом 2 мс на округление) и не старше 5 с.
     static qint64 eventTimeToNs(qreal eventTimeSeconds, qint64 nowNs);
 
+    // Что markInput() делает с событием: от какого момента считать латентность
+    // до swap и какой образец (0 - никакого) отдать задержке до показа. Чужая
+    // метка в задержку до показа не идёт: запасное «сейчас» её занизило бы.
+    struct InputMark
+    {
+        qint64 latencyFromNs = 0;
+        qint64 presentationNs = 0;
+        bool foreign = false;
+    };
+    static InputMark classifyInput(qreal eventTimeSeconds, qint64 nowNs);
+
+    // Была ли попытка создать пробу задержки до показа. Без UQ_FRAME_LOG её
+    // быть не должно ни на какой платформе (specs/idle-power); create() вне
+    // Wayland и так вернёт nullptr, поэтому тест смотрит на саму попытку.
+    bool presentationProbeAttempted() const { return m_presentationTried; }
+
 signals:
     void windowChanged();
     void activeChanged();

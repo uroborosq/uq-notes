@@ -4,6 +4,8 @@
 #include <QVector>
 #include <QtGlobal>
 
+#include <atomic>
+
 // Задержка «метка события пера -> показ кадра с этим событием» (design.md, D1).
 // Здесь только арифметика: какие события вошли в кадр и как свести задержки в
 // сводку. Протокол wp_presentation живёт в presentationfeedback.cpp и
@@ -23,6 +25,30 @@ struct FrameInputs
 
     bool isEmpty() const { return oldestNs <= 0; }
     void add(qint64 eventNs);
+};
+
+// Какие события ввода вошли в кадр. Поток GUI отмечает события (noteInput),
+// поток рендера на синхронизации забирает всё отмеченное в кадр (beginFrame:
+// поток GUI в этот момент стоит), после отрисовки отдаёт заказу feedback
+// (takeForRenderedFrame) и на конце кадра сбрасывает остаток (endFrame). Так
+// события кадра, который закончился без отрисовки (beginFrame RHI не удался,
+// окно не готово), не приписываются следующему кадру: Qt 6 парно шлёт
+// beforeFrameBegin/afterFrameEnd в обоих циклах рендера, в том числе на этих
+// путях.
+class FrameInputTracker
+{
+public:
+    void noteInput(qint64 eventNs); // поток GUI
+    void beginFrame();              // beforeSynchronizing, поток рендера
+    FrameInputs takeForRenderedFrame(); // afterRendering, поток рендера
+    void endFrame() { m_frame = FrameInputs(); } // afterFrameEnd, поток рендера
+
+private:
+    // Поток GUI пишет, поток рендера забирает на синхронизации.
+    std::atomic<qint64> m_pendingOldestNs{0};
+    std::atomic<qint64> m_pendingNewestNs{0};
+    // Только поток рендера: от синхронизации до конца того же кадра.
+    FrameInputs m_frame;
 };
 
 struct PresentationSummary

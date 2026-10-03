@@ -17,6 +17,9 @@ constexpr int kMaxSamples = 4096;
 // Окно правдоподобия метки события относительно момента обработки, мс.
 constexpr qint64 kStampFutureToleranceMs = 2;
 constexpr qint64 kStampMaxAgeMs = 5000;
+// Метка дальше этого - заведомо чужая (около 31 года аптайма); заодно
+// llround ниже не переполняется.
+constexpr qreal kStampMaxSeconds = 1e9;
 }
 
 qint64 FrameStats::nowNs()
@@ -113,7 +116,8 @@ void FrameStats::reset()
 
 qint64 FrameStats::eventTimeToNs(qreal eventTimeSeconds, qint64 nowNs)
 {
-    if (eventTimeSeconds < 0.0 || nowNs <= 0)
+    // Отрицание сравнения ловит и NaN.
+    if (!(eventTimeSeconds >= 0.0 && eventTimeSeconds <= kStampMaxSeconds) || nowNs <= 0)
         return -1;
     const qint64 nowMs = nowNs / 1'000'000;
     const auto stampMs32 = uint32_t(std::llround(eventTimeSeconds * 1000.0) & 0xffffffffLL);
@@ -125,25 +129,39 @@ qint64 FrameStats::eventTimeToNs(qreal eventTimeSeconds, qint64 nowNs)
     return (nowMs - ageMs) * 1'000'000;
 }
 
+FrameStats::InputMark FrameStats::classifyInput(qreal eventTimeSeconds, qint64 nowNs)
+{
+    InputMark mark;
+    const qint64 stamp = eventTimeToNs(eventTimeSeconds, nowNs);
+    if (stamp >= 0) {
+        mark.latencyFromNs = mark.presentationNs = stamp;
+    } else if (eventTimeSeconds >= 0.0) {
+        // Метка не из CLOCK_MONOTONIC (другой композитор, синтетика тестов) -
+        // латентность до swap остаётся от момента обработки, а счётчик
+        // показывает, что замер занижен.
+        mark.latencyFromNs = nowNs;
+        mark.foreign = true;
+    } else {
+        // Метки нет (сценарный ввод) - всё от момента обработки.
+        mark.latencyFromNs = mark.presentationNs = nowNs;
+    }
+    return mark;
+}
+
 void FrameStats::markInput(qreal eventTimeSeconds)
 {
     if (!m_active)
         return;
-    const qint64 now = nowNs();
-    qint64 input = eventTimeToNs(eventTimeSeconds, now);
-    if (input < 0) {
-        // Метка не из CLOCK_MONOTONIC (другой композитор, синтетика тестов) -
-        // остаётся момент обработки, а счётчик показывает, что замер занижен.
-        if (eventTimeSeconds >= 0.0)
-            ++m_foreignInputStamps;
-        input = now;
-    }
+    const InputMark mark = classifyInput(eventTimeSeconds, nowNs());
+    if (mark.foreign)
+        ++m_foreignInputStamps;
     // Держим самое раннее ещё не показанное событие: латентность считается по
     // нему, иначе поток промежуточных событий занижал бы результат.
     qint64 expected = 0;
-    m_pendingInputNs.compare_exchange_strong(expected, input, std::memory_order_relaxed);
-    if (m_presentation)
-        m_presentation->noteInput(input);
+    m_pendingInputNs.compare_exchange_strong(expected, mark.latencyFromNs,
+                                             std::memory_order_relaxed);
+    if (m_presentation && mark.presentationNs > 0)
+        m_presentation->noteInput(mark.presentationNs);
 }
 
 void FrameStats::onBeforeRendering()
