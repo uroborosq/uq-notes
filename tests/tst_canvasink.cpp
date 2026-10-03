@@ -702,14 +702,18 @@ private slots:
                  "штрих после отмены и повтора не совпал с нанесённым");
         QCOMPARE(m_ink.allStrokes().first().stroke.style, drawn.style);
 
-        // Экспорт вписывает контур из тех же точек; его торец - точка отрыва.
+        // Экспорт вписывает контур из тех же точек; центр дуги его конечного
+        // торца - точка отрыва.
         StrokeTessellator tessellator;
         tessellator.setWidth(drawn.width);
         tessellator.setStyle(drawn.style);
         const QVector<StrokeTessellator::Vertex> strip = tessellator.tessellate(drawn.points);
         QVERIFY(!tessellator.outline(drawn.points).isEmpty());
-        const QPointF capCenter((strip[strip.size() - 2].x + strip[strip.size() - 1].x) / 2.0,
-                                (strip[strip.size() - 2].y + strip[strip.size() - 1].y) / 2.0);
+        // Торец - последние 2·(K + 1) вершин полосы; первая его пара -
+        // боковая, c ± r·n, её середина - центр дуги торца (design.md, D4).
+        const int capStart = int(strip.size()) - 2 * (StrokeTessellator::kCapPairs + 1);
+        const QPointF capCenter((strip[capStart].x + strip[capStart + 1].x) / 2.0,
+                                (strip[capStart].y + strip[capStart + 1].y) / 2.0);
         QVERIFY2(std::hypot(capCenter.x() - lastContact.x(), capCenter.y() - lastContact.y())
                      < 1e-3,
                  "торец контура экспорта не в точке отрыва");

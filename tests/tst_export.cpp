@@ -529,6 +529,69 @@ private slots:
                  qPrintable(QStringLiteral("Tapered: масса %1 при Legacy %2").arg(tapered).arg(legacy)));
     }
 
+    // ink-beauty-pass, D4 и D5: конец линии в экспорте круглый и выступает за
+    // последнюю точку на полуширину, а касание в одной точке - круг. 72 точки
+    // на дюйм: пиксель - точка страницы.
+    void roundEndsAndDotsAreExported()
+    {
+        PdfDocumentModel document;
+        QVERIFY(document.open(fixtures::noOutline()));
+        const Prepared prepared = prepare(document);
+
+        InkDocument ink;
+        // Полуширина 5: толщина 10, полный нажим.
+        Stroke line;
+        line.page = 0;
+        line.width = 10.0;
+        line.color = QColor(220, 20, 30);
+        for (int i = 0; i <= 20; ++i)
+            line.points.append({QPointF(100 + i * 5.0, 200), 1.0, i / 200.0});
+        QVERIFY(ink.addStroke(line) != 0);
+        Stroke dot = line;
+        dot.points = {{QPointF(300, 300), 1.0, 0.0}, {QPointF(300, 300), 1.0, 0.01}};
+        QVERIFY(ink.addStroke(dot) != 0);
+
+        const QString output = m_dir.filePath(QStringLiteral("round-ends.pdf"));
+        QString error;
+        QVERIFY2(NoteExporter::exportNow(fixtures::noOutline(), prepared.sizes,
+                                         prepared.rotations, ink.allStrokes(), output, &error),
+                 qPrintable(error));
+
+        const QString png = m_dir.filePath(QStringLiteral("round-ends"));
+        QProcess render;
+        render.start(QStringLiteral("pdftoppm"),
+                     {QStringLiteral("-f"), QStringLiteral("1"), QStringLiteral("-l"),
+                      QStringLiteral("1"), QStringLiteral("-r"), QStringLiteral("72"),
+                      QStringLiteral("-png"), output, png});
+        QVERIFY(render.waitForFinished(60000));
+        const QFileInfo root(png);
+        const QStringList produced =
+            QDir(root.absolutePath())
+                .entryList({root.fileName() + QStringLiteral("-*.png")}, QDir::Files);
+        QVERIFY(!produced.isEmpty());
+        const QImage image(QDir(root.absolutePath()).filePath(produced.first()));
+        QVERIFY(!image.isNull());
+
+        const auto anyRed = [&image](const QRect &area) {
+            for (int y = area.top(); y <= area.bottom(); ++y) {
+                for (int x = area.left(); x <= area.right(); ++x) {
+                    const QColor c = image.pixelColor(x, y);
+                    if (image.valid(x, y) && c.red() > 150 && c.green() < 110 && c.blue() < 110)
+                        return true;
+                }
+            }
+            return false;
+        };
+
+        // Осевая линии кончается в x = 200, торец доходит до 205.
+        QVERIFY2(anyRed(QRect(201, 198, 2, 4)), "конец линии в экспорте не скруглён наружу");
+        QVERIFY(!anyRed(QRect(207, 195, 4, 10)));
+        // Точка - круг диаметром 10 вокруг (300, 300).
+        QVERIFY2(anyRed(QRect(298, 298, 4, 4)), "точки нет в экспорте");
+        QVERIFY(anyRed(QRect(296, 299, 1, 2)) && anyRed(QRect(303, 299, 1, 2)));
+        QVERIFY(!anyRed(QRect(307, 295, 3, 10)));
+    }
+
 private:
     QTemporaryDir m_dir;
 };

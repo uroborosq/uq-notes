@@ -3,11 +3,45 @@
 // и что итог совпадает с полной тесселяцией.
 
 #include <QElapsedTimer>
+#include <QLineF>
 #include <QTest>
 
 #include "ink/stroketessellator.h"
 #include "ink/wetstroke.h"
 #include "support/referencestrokes.h"
+
+namespace {
+
+// Вершин в одном торце: K + 1 пар (design.md, D4).
+constexpr int kCapVertices = 2 * (StrokeTessellator::kCapPairs + 1);
+
+QPointF toPoint(const WetStroke::Vertex &v)
+{
+    return QPointF(v.x, v.y);
+}
+
+// Центр дуги конечного торца. Торец - последние kCapVertices вершин полосы,
+// его первая пара - боковая, c + r·n и c - r·n, и её середина - центр c.
+// Кончик торца (последняя пара) лежит на полуширину дальше центра, поэтому
+// «конец линии» - центр дуги, а не середина последней пары.
+QPointF endCapCenter(const QVector<WetStroke::Vertex> &strip)
+{
+    const int i = int(strip.size()) - kCapVertices;
+    return (toPoint(strip[i]) + toPoint(strip[i + 1])) / 2.0;
+}
+
+bool sameStrip(const QVector<WetStroke::Vertex> &a, const QVector<WetStroke::Vertex> &b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (int i = 0; i < a.size(); ++i) {
+        if (qAbs(a[i].x - b[i].x) >= 1e-3 || qAbs(a[i].y - b[i].y) >= 1e-3)
+            return false;
+    }
+    return true;
+}
+
+} // namespace
 
 class TestWetStroke : public QObject
 {
@@ -131,8 +165,8 @@ private slots:
 
     // --- rnote-grade-stroke-fidelity, задача 5.2 --------------------------
 
-    // Сценарий «Кончик линии у пера»: торец полосы после каждого отсчёта стоит
-    // у последнего положения пера.
+    // Сценарий «Кончик линии у пера»: центр дуги торца после каждого отсчёта
+    // стоит у последнего положения пера.
     void stripEndFollowsThePenOnFastArc()
     {
         WetStroke wet;
@@ -142,19 +176,73 @@ private slots:
 
         for (int i = 0; i < input.size(); ++i) {
             wet.addPoint(input[i]);
-            if (wet.strip().size() < 4)
+            if (wet.strip().size() < 2 * kCapVertices)
                 continue;
-            // Торец - пара вершин по нормали, его середина - конец линии.
-            const WetStroke::Vertex &a = wet.strip()[wet.strip().size() - 2];
-            const WetStroke::Vertex &b = wet.strip()[wet.strip().size() - 1];
-            const QPointF end((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-            const qreal lag = std::hypot(end.x() - input[i].position.x(),
-                                         end.y() - input[i].position.y());
+            const QPointF end = endCapCenter(wet.strip());
+            const qreal lag = QLineF(end, input[i].position).length();
             QVERIFY2(lag <= 2.0,
                      qPrintable(QStringLiteral("конец линии отстал на %1 на отсчёте %2")
                                     .arg(lag)
                                     .arg(i)));
         }
+    }
+
+    // ink-beauty-pass, D4: торцы круглые и в окончательной части, и в
+    // провизорной - на каждом отсчёте.
+    void wetCapsAreRoundAtEveryStep()
+    {
+        WetStroke wet;
+        wet.begin(0, prototype(3.0));
+        const QList<InkPoint> input =
+            reference::sampledAtSpeed(reference::loop(), 600.0, 481.0);
+
+        int checked = 0;
+        for (int i = 0; i < input.size(); ++i) {
+            wet.addPoint(input[i]);
+            if (wet.settledVertexCount() < kCapVertices)
+                continue;
+            const QVector<WetStroke::Vertex> &strip = wet.strip();
+            // Начальный торец уже окончательный: полудиск вокруг первой точки.
+            const InkPoint &first = wet.points().constFirst();
+            const qreal r0 = wet.tessellator().halfWidthAt(first);
+            for (int v = 0; v < kCapVertices; ++v)
+                QVERIFY(qAbs(QLineF(toPoint(strip[v]), first.position).length() - r0) <= 0.05 * r0);
+            // Конечный торец провизорный: полудиск вокруг конца хвоста.
+            const InkPoint &tip = wet.provisionalPoints().isEmpty()
+                ? wet.points().constLast()
+                : wet.provisionalPoints().constLast();
+            const qreal r1 = wet.tessellator().halfWidthAt(tip);
+            for (int v = int(strip.size()) - kCapVertices; v < strip.size(); ++v)
+                QVERIFY(qAbs(QLineF(toPoint(strip[v]), tip.position).length() - r1) <= 0.05 * r1);
+            ++checked;
+        }
+        QVERIFY2(checked > 100, qPrintable(QStringLiteral("проверено отсчётов: %1").arg(checked)));
+    }
+
+    // На отрыве мокрый торец совпадает с сухим и смотрит по хорде, даже если
+    // дотяжка до точки контакта дописала короткий отрезок вбок.
+    void hookedEndMatchesDryAndFollowsChord()
+    {
+        WetStroke wet;
+        wet.begin(0, prototype(3.0));
+        QList<InkPoint> input =
+            reference::sampledAtSpeed(reference::straightLine(100, 120.0), 300.0, 240.0);
+        input.append({input.constLast().position + QPointF(0.3, 0.4), 0.6,
+                      input.constLast().timeSeconds + 1.0 / 240.0});
+        for (const InkPoint &point : input)
+            wet.addPoint(point);
+        const Stroke stroke = wet.finish();
+
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        QVERIFY(sameStrip(wet.strip(), tessellator.tessellate(stroke.points)));
+
+        // Кончик торца - почти по оси x, а не под 53°, как крючок.
+        const QPointF end = stroke.points.constLast().position;
+        const QPointF tip = toPoint(wet.strip().constLast());
+        const qreal angle = std::atan2(tip.y() - end.y(), tip.x() - end.x()) * 180.0 / M_PI;
+        QVERIFY2(qAbs(angle) < 20.0, qPrintable(QStringLiteral("торец под %1°").arg(angle)));
     }
 
     // Сценарий «Резкая смена направления»: после разворота провизорная часть
@@ -230,8 +318,10 @@ private slots:
         QCOMPARE(stroke.style, StrokeStyle::Tapered);
 
         const QVector<WetStroke::Vertex> &strip = wet.strip();
-        QVERIFY(strip.size() >= 4);
-        for (int i = 0; i + 1 < strip.size(); i += 2) {
+        QVERIFY(strip.size() >= 2 * kCapVertices);
+        // Пары от боковой пары начального торца до боковой пары конечного;
+        // внутри торцов пары - хорды полудиска, а не поперечник (D4).
+        for (int i = kCapVertices - 2; i <= int(strip.size()) - kCapVertices; i += 2) {
             const qreal width = std::hypot(strip[i].x - strip[i + 1].x, strip[i].y - strip[i + 1].y);
             QVERIFY2(qAbs(width - 4.0 * 0.08) < 1e-3,
                      qPrintable(QStringLiteral("толщина %1 в паре %2").arg(width).arg(i / 2)));

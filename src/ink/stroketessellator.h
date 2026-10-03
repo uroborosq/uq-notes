@@ -52,9 +52,28 @@ public:
     // штриха: одна и та же математика стыка используется и при полной
     // тесселяции, и при дописывании хвоста.
     //
-    // Торец штриха: пара вершин по нормали к направлению.
+    // Торец штриха - полудиск радиуса полуширины в точке (design.md, D4):
+    // осевая кончается в точке касания и в точке отрыва, а торец выступает за
+    // неё на полуширину. Полудиск собран из kCapPairs + 1 симметричных пар
+    // вершин c + r·(∓cos αk·t ± sin αk·n), αk = (π/2)·k/K: пары сохраняют
+    // чётность полосы, поэтому outline(), экспорт и мокрая полоса работают с
+    // торцом без изменений. Пара с k = K - боковая, c ± r·n: у начального
+    // торца она последняя, у конечного - первая, и её середина - центр торца.
+    enum class CapEnd { Start, End };
+    static constexpr int kCapPairs = 8;
+    // Дальше стольких точек от конца хорда для направления торца не ищется:
+    // столько же точек мокрый штрих держит под рукой, чтобы его торец совпал с
+    // сухим, а работа на отсчёт не росла с длиной штриха.
+    static constexpr int kCapLookback = 48;
+
+    // direction - направление движения пера у этого конца.
     void emitCap(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
-                 const QPointF &direction) const;
+                 const QPointF &direction, CapEnd end) const;
+    // Направление торца - хорда до первой точки на расстоянии не меньше radius
+    // от конца, но не дальше kCapLookback точек, а не последний отрезок: на
+    // отрыве дотяжка до точки контакта дописывает отрезок короче шага со
+    // случайным направлением. Вырожденный штрих - (1, 0).
+    static QPointF capDirection(const QList<InkPoint> &points, CapEnd end, qreal radius);
     // Стык: биссектриса на пологом повороте, дуга скругления на резком.
     void emitJoint(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
                    const QPointF &incoming, const QPointF &outgoing) const;

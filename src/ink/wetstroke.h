@@ -52,6 +52,9 @@ public:
 
 private:
     void rebuildTail();
+    // Начальный торец можно класть в окончательную часть: хорда для его
+    // направления больше не изменится.
+    bool startCapIsSettled(const QList<InkPoint> &points) const;
 
     bool m_active = false;
     int m_page = -1;

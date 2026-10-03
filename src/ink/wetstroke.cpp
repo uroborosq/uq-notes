@@ -15,6 +15,24 @@ QPointF normalizedDirection(const QPointF &from, const QPointF &to, const QPoint
     return delta / length;
 }
 
+// Последние точки осевой вместе с провизорным хвостом - не больше, чем
+// торец просматривает назад. tail[0] - последняя окончательная точка, она
+// берётся из хвоста. На отрыве окно совпадает с последними точками штриха,
+// поэтому мокрый торец совпадает с сухим вершина в вершину.
+QList<InkPoint> endCapWindow(const QList<InkPoint> &points, const QList<InkPoint> &tail)
+{
+    const int lookback = StrokeTessellator::kCapLookback;
+    const int fromTail = qMin(int(tail.size()), lookback);
+    const int fromPoints = qMin(int(points.size()) - 1, lookback - fromTail);
+    QList<InkPoint> window;
+    window.reserve(fromPoints + fromTail);
+    for (int i = int(points.size()) - 1 - fromPoints; i < int(points.size()) - 1; ++i)
+        window.append(points[i]);
+    for (int j = int(tail.size()) - fromTail; j < int(tail.size()); ++j)
+        window.append(tail[j]);
+    return window;
+}
+
 } // namespace
 
 void WetStroke::begin(int page, const Stroke &prototype, qreal scale)
@@ -66,58 +84,80 @@ void WetStroke::rebuildTail()
 
     // Снимаем провизорную часть.
     m_strip.resize(m_settledVertices);
-    if (points.size() + provisional.size() < 2)
+    if (points.isEmpty())
         return;
 
-    if (points.size() >= 2) {
-        QPointF previous = m_directions.isEmpty() ? QPointF(1.0, 0.0) : m_directions.constLast();
-        for (int i = m_directions.size(); i + 1 < points.size(); ++i) {
-            previous = normalizedDirection(points[i].position, points[i + 1].position, previous);
-            m_directions.append(previous);
-        }
-
-        if (m_jointedPoints == 0) {
-            m_tessellator.emitCap(m_strip, points.first().position,
-                                  m_tessellator.halfWidthAt(points.first()), m_directions.first());
-            m_jointedPoints = 1;
-        }
-
-        // Стык в точке i опирается на сегменты i-1 и i, поэтому становится
-        // окончательным ровно тогда, когда появилась окончательная точка i+1.
-        for (int i = m_jointedPoints; i + 1 < points.size(); ++i) {
-            m_tessellator.emitJoint(m_strip, points[i].position,
-                                    m_tessellator.halfWidthAt(points[i]), m_directions[i - 1],
-                                    m_directions[i]);
-        }
-        m_jointedPoints = qMax(m_jointedPoints, int(points.size()) - 1);
-        m_settledVertices = m_strip.size();
+    // Направления новых окончательных сегментов.
+    QPointF previous = m_directions.isEmpty() ? QPointF(1.0, 0.0) : m_directions.constLast();
+    for (int i = m_directions.size(); i + 1 < points.size(); ++i) {
+        previous = normalizedDirection(points[i].position, points[i + 1].position, previous);
+        m_directions.append(previous);
     }
 
-    // Провизорная часть: последняя окончательная точка и хвост за ней.
+    if (m_jointedPoints == 0) {
+        if (!startCapIsSettled(points)) {
+            // Хорда для начального торца ещё не известна: вся полоса
+            // провизорная и строится тем же правилом, что и сухая.
+            QList<InkPoint> all = points;
+            all.append(provisional);
+            m_strip = m_tessellator.tessellate(all);
+            return;
+        }
+        const qreal radius = m_tessellator.halfWidthAt(points.first());
+        m_tessellator.emitCap(
+            m_strip, points.first().position, radius,
+            StrokeTessellator::capDirection(points, StrokeTessellator::CapEnd::Start, radius),
+            StrokeTessellator::CapEnd::Start);
+        m_jointedPoints = 1;
+    }
+
+    // Стык в точке i опирается на сегменты i-1 и i, поэтому становится
+    // окончательным ровно тогда, когда появилась окончательная точка i+1.
+    for (int i = m_jointedPoints; i + 1 < points.size(); ++i) {
+        m_tessellator.emitJoint(m_strip, points[i].position, m_tessellator.halfWidthAt(points[i]),
+                                m_directions[i - 1], m_directions[i]);
+    }
+    m_jointedPoints = qMax(m_jointedPoints, int(points.size()) - 1);
+    m_settledVertices = m_strip.size();
+
+    // Провизорная часть: последняя окончательная точка, хвост за ней и торец.
     QList<InkPoint> tail;
     tail.reserve(provisional.size() + 1);
     tail.append(points.constLast());
     tail.append(provisional);
 
-    QPointF incoming = m_directions.isEmpty()
-        ? normalizedDirection(tail[0].position, tail[1].position, QPointF(1.0, 0.0))
-        : m_directions.constLast();
-    int from = 0;
-    if (m_directions.isEmpty()) {
-        // Окончательного сегмента ещё нет: начальный торец тоже провизорный.
-        m_tessellator.emitCap(m_strip, tail[0].position, m_tessellator.halfWidthAt(tail[0]),
-                              incoming);
-        from = 1;
-    }
-    for (int j = from; j + 1 < tail.size(); ++j) {
+    QPointF incoming = m_directions.constLast();
+    for (int j = 0; j + 1 < tail.size(); ++j) {
         const QPointF outgoing =
             normalizedDirection(tail[j].position, tail[j + 1].position, incoming);
         m_tessellator.emitJoint(m_strip, tail[j].position, m_tessellator.halfWidthAt(tail[j]),
                                 incoming, outgoing);
         incoming = outgoing;
     }
-    m_tessellator.emitCap(m_strip, tail.constLast().position,
-                          m_tessellator.halfWidthAt(tail.constLast()), incoming);
+    const InkPoint &end = tail.constLast();
+    const qreal radius = m_tessellator.halfWidthAt(end);
+    m_tessellator.emitCap(m_strip, end.position, radius,
+                          StrokeTessellator::capDirection(endCapWindow(points, tail),
+                                                          StrokeTessellator::CapEnd::End, radius),
+                          StrokeTessellator::CapEnd::End);
+}
+
+bool WetStroke::startCapIsSettled(const QList<InkPoint> &points) const
+{
+    if (points.size() < 2)
+        return false;
+    // Хорда либо уже найдена среди первых kCapLookback точек, либо искать её
+    // дальше незачем - так же решает StrokeTessellator::capDirection.
+    if (points.size() >= StrokeTessellator::kCapLookback)
+        return true;
+    const QPointF start = points.constFirst().position;
+    const qreal radius = m_tessellator.halfWidthAt(points.constFirst());
+    for (int i = 1; i < points.size(); ++i) {
+        const QPointF delta = points[i].position - start;
+        if (std::hypot(delta.x(), delta.y()) >= radius)
+            return true;
+    }
+    return false;
 }
 
 Stroke WetStroke::finish()

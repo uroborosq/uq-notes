@@ -3842,7 +3842,7 @@ include-ом.
 - Test: `tests/tst_stroketessellator.cpp`, `tests/tst_wetstroke.cpp`,
   `tests/tst_canvasink.cpp` (`finishedStrokeIsTheSameEverywhere`), `tests/tst_export.cpp`
 
-- [ ] 6.1 **Тесты тесселятора: помощники для торцов.** `tests/tst_stroketessellator.cpp`:
+- [x] 6.1 **Тесты тесселятора: помощники для торцов.** `tests/tst_stroketessellator.cpp`:
   после `#include <QTest>` добавить `#include <QLineF>` (строка include становится
   такой):
 
@@ -3897,7 +3897,7 @@ include-ом.
   }
   ```
 
-- [ ] 6.2 **Тесты тесселятора: переписать проверки, считавшие торец одной парой.**
+- [x] 6.2 **Тесты тесселятора: переписать проверки, считавшие торец одной парой.**
   В том же файле заменить целиком функцию `straightStrokeHasRequestedWidth()`:
 
   ```cpp
@@ -3981,7 +3981,7 @@ include-ом.
           QVERIFY2(tessellator.tessellate(sharp).size() > 2 * kCapVertices + 2, "стык не скруглён");
   ```
 
-- [ ] 6.3 **Тесты тесселятора: торцы, направление по хорде, контур экспорта, касание в
+- [x] 6.3 **Тесты тесселятора: торцы, направление по хорде, контур экспорта, касание в
   одной точке.** В том же файле вставить перед `void degenerateInputIsHandled()`:
 
   ```cpp
@@ -4148,7 +4148,7 @@ include-ом.
       }
   ```
 
-- [ ] 6.4 **Тесты мокрого штриха: помощники, «конец линии у пера» по центру дуги,
+- [x] 6.4 **Тесты мокрого штриха: помощники, «конец линии у пера» по центру дуги,
   круглые торцы на каждом отсчёте, крючок на отрыве.** `tests/tst_wetstroke.cpp`:
   после `#include <QElapsedTimer>` добавить `#include <QLineF>`; перед
   `class TestWetStroke : public QObject` вставить:
@@ -4274,7 +4274,7 @@ include-ом.
       }
   ```
 
-- [ ] 6.5 **Тест холста: торец контура экспорта - по центру дуги.**
+- [x] 6.5 **Тест холста: торец контура экспорта - по центру дуги.**
   `tests/tst_canvasink.cpp`, функция `finishedStrokeIsTheSameEverywhere()`, последний
   блок. Заменить
 
@@ -4297,7 +4297,7 @@ include-ом.
   точка отрыва.») заменить на «Экспорт вписывает контур из тех же точек; центр дуги
   его конечного торца - точка отрыва.»
 
-- [ ] 6.6 **Тест экспорта: круглый конец и точка в PDF.** `tests/tst_export.cpp`:
+- [x] 6.6 **Тест экспорта: круглый конец и точка в PDF.** `tests/tst_export.cpp`:
   вставить перед `private:` в конце класса (после `insertInkIsNotExported()`):
 
   ```cpp
@@ -4365,7 +4365,7 @@ include-ом.
       }
   ```
 
-- [ ] 6.7 **Прогон тестов до реализации (ожидаемый провал).**
+- [x] 6.7 **Прогон тестов до реализации (ожидаемый провал).**
 
   ```sh
   cmake --build build -j$(nproc) 2>&1 | grep -E "error:" | head -20
@@ -4379,7 +4379,7 @@ include-ом.
   `tst_export` собирается и падает в `roundEndsAndDotsAreExported` на
   `конец линии в экспорте не скруглён наружу` (плоский торец кончается в x = 200).
 
-- [ ] 6.8 **Интерфейс торца в `StrokeTessellator`.** `src/ink/stroketessellator.h`:
+- [x] 6.8 **Интерфейс торца в `StrokeTessellator`.** `src/ink/stroketessellator.h`:
   заменить блок от комментария `// Поэлементная выдача - на ней стоит` до объявления
   `emitCap` включительно:
 
@@ -4424,7 +4424,7 @@ include-ом.
       static QPointF capDirection(const QList<InkPoint> &points, CapEnd end, qreal radius);
   ```
 
-- [ ] 6.9 **Полудиск и хорда в `stroketessellator.cpp`.** Заменить функцию
+- [x] 6.9 **Полудиск и хорда в `stroketessellator.cpp`.** Заменить функцию
   `StrokeTessellator::emitCap` целиком на две функции:
 
   ```cpp
@@ -4512,7 +4512,7 @@ include-ом.
 
   `outline()` и `isDegenerate()` не меняются.
 
-- [ ] 6.10 **Мокрый штрих: начальный торец по хорде, конечный - по окну.**
+- [x] 6.10 **Мокрый штрих: начальный торец по хорде, конечный - по окну.**
   `src/ink/wetstroke.h`: в секции `private:` после `void rebuildTail();` добавить
 
   ```cpp
@@ -4640,7 +4640,7 @@ include-ом.
   `tessellate(all)` ограничен ими и хвостом; после - как прежде, только новые стыки
   и хвост, плюс `endCapWindow` и `capDirection` по ≤ 48 точкам.
 
-- [ ] 6.11 **Прогон тестов ink (ожидаемый проход).**
+- [x] 6.11 **Прогон тестов ink (ожидаемый проход).**
 
   ```sh
   cmake --build build -j$(nproc)
@@ -4653,7 +4653,7 @@ include-ом.
   упало ниже 0.33 - работа на событие стала расти, искать в `endCapWindow` или
   в ветке `startCapIsSettled`, а не править порог.
 
-- [ ] 6.12 **Прогон холста, экспорта и графа сцены.**
+- [x] 6.12 **Прогон холста, экспорта и графа сцены.**
 
   ```sh
   ctest --test-dir build -R 'tst_canvasink|tst_export|tst_pagescenegraph|tst_documentcanvas' --output-on-failure
@@ -4664,7 +4664,7 @@ include-ом.
   точке отрыва (< 1e-3), `tst_pagescenegraph::wetStrokeNodesFollowShrinkingStrip`
   по-прежнему видит укорачивание полосы и второй кусок (`peak > 512`).
 
-- [ ] 6.13 **Полный прогон и коммит.**
+- [x] 6.13 **Полный прогон и коммит.**
 
   ```sh
   ctest --test-dir build --output-on-failure

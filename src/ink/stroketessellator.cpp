@@ -84,11 +84,45 @@ qreal StrokeTessellator::halfWidthAt(const InkPoint &point) const
 
 
 void StrokeTessellator::emitCap(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
-                                const QPointF &direction) const
+                                const QPointF &direction, CapEnd end) const
 {
+    // Начальный торец идёт от кончика позади точки касания к боковой паре,
+    // конечный - от боковой пары к кончику за точкой отрыва: так торец
+    // стыкуется с полосой без разворота пар. Кончик - пара из двух совпадающих
+    // вершин, её треугольники нулевой площади и ничего не рисуют.
     const QPointF normal = normalOf(direction);
-    strip.append(toVertex(position + normal * halfWidth));
-    strip.append(toVertex(position - normal * halfWidth));
+    const qreal sign = end == CapEnd::Start ? -1.0 : 1.0;
+    for (int i = 0; i <= kCapPairs; ++i) {
+        const int k = end == CapEnd::Start ? i : kCapPairs - i;
+        const qreal angle = M_PI_2 * k / kCapPairs;
+        const QPointF base = position + direction * (sign * halfWidth * std::cos(angle));
+        const QPointF side = normal * (halfWidth * std::sin(angle));
+        // Порядок в паре тот же, что у стыка: сначала «левая» сторона.
+        strip.append(toVertex(base + side));
+        strip.append(toVertex(base - side));
+    }
+}
+
+QPointF StrokeTessellator::capDirection(const QList<InkPoint> &points, CapEnd end, qreal radius)
+{
+    const int count = int(points.size());
+    if (count < 2)
+        return QPointF(1.0, 0.0);
+    // k-я точка от того конца, у которого строится торец.
+    const auto from = [&points, count, end](int k) {
+        return end == CapEnd::Start ? points[k].position : points[count - 1 - k].position;
+    };
+    const QPointF tip = from(0);
+    const int reach = qMin(count, kCapLookback);
+    QPointF far = tip;
+    for (int k = 1; k < reach; ++k) {
+        far = from(k);
+        if (std::hypot(far.x() - tip.x(), far.y() - tip.y()) >= radius)
+            break;
+    }
+    // Направление движения пера: в начале - от касания вперёд, в конце - к отрыву.
+    const QPointF direction = normalized(end == CapEnd::Start ? far - tip : tip - far);
+    return direction.isNull() ? QPointF(1.0, 0.0) : direction;
 }
 
 void StrokeTessellator::emitJoint(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
@@ -151,7 +185,7 @@ void StrokeTessellator::emitJoint(QVector<Vertex> &strip, const QPointF &positio
     }
 }
 
-QVector<StrokeTessellator::Vertex> StrokeTessellator::tessellate(    const QList<InkPoint> &points) const
+QVector<StrokeTessellator::Vertex> StrokeTessellator::tessellate(const QList<InkPoint> &points) const
 {
     QVector<Vertex> strip;
     if (points.size() < 2)
@@ -170,14 +204,18 @@ QVector<StrokeTessellator::Vertex> StrokeTessellator::tessellate(    const QList
         previous = direction;
     }
 
-    strip.reserve(points.size() * 4);
+    strip.reserve(points.size() * 4 + 4 * (kCapPairs + 1));
 
-    emitCap(strip, points.first().position, halfWidthAt(points.first()), directions.first());
+    const qreal startRadius = halfWidthAt(points.first());
+    emitCap(strip, points.first().position, startRadius,
+            capDirection(points, CapEnd::Start, startRadius), CapEnd::Start);
     for (int i = 1; i + 1 < points.size(); ++i) {
         emitJoint(strip, points[i].position, halfWidthAt(points[i]), directions[i - 1],
                   directions[i]);
     }
-    emitCap(strip, points.last().position, halfWidthAt(points.last()), directions.last());
+    const qreal endRadius = halfWidthAt(points.last());
+    emitCap(strip, points.last().position, endRadius,
+            capDirection(points, CapEnd::End, endRadius), CapEnd::End);
 
     return strip;
 }
