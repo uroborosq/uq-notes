@@ -175,8 +175,10 @@ Stroke WetStroke::finish()
     m_active = false;
 
     // Случайный задев, а не точка: короче 30 мс и почти без нажима
-    // (design.md, D5). У мыши давления нет, её касание не отбрасывается.
-    const qreal peak = m_sampler.peakPressure();
+    // (design.md, D5). Нажим - сырой, а не отфильтрованный: фильтр отстаёт на
+    // нарастании, и быстрое намеренное касание по нему выглядело бы задевом.
+    // У мыши давления нет, её касание не отбрасывается.
+    const qreal peak = m_sampler.peakRawPressure();
     if (peak >= 0.0 && peak < kGrazePressure && m_sampler.contactDuration() < kGrazeSeconds) {
         m_strip.clear();
         m_settledVertices = 0;

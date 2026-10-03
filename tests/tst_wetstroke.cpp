@@ -228,6 +228,40 @@ private slots:
             QVERIFY(wet.strip().isEmpty());
     }
 
+    // Сценарий «Случайный задев» мерит давление касания, а не сглаженное:
+    // фильтр давления отстаёт на нарастании, и у быстрого намеренного касания
+    // отфильтрованный пик ниже порога 0.05, хотя перо нажало до 0.08. Такая
+    // точка остаётся. Давления подобраны под нынешний фильтр: у 0.01/0.08/
+    // 0.15/0.10 отфильтрованный пик 0.08 и различия не видно, а у этого
+    // касания (16 мс, отсчёт в 4 мс) он около 0.042. Это проверяется первым,
+    // иначе тест ничего бы не доказывал.
+    void quickFirmTapIsKeptDespiteFilterLag()
+    {
+        const QPointF at(10, 10);
+        const QList<InkPoint> input = {{at, 0.01, 0.000},
+                                       {at, 0.02, 0.004},
+                                       {at, 0.04, 0.008},
+                                       {at, 0.08, 0.012},
+                                       {at, 0.06, 0.016}};
+        StrokeSampler reference;
+        for (const InkPoint &point : input)
+            reference.append(point);
+        QVERIFY2(reference.peakPressure() < 0.05,
+                 qPrintable(QStringLiteral("отфильтрованный пик %1 - подобрать давления заново")
+                                .arg(reference.peakPressure())));
+        QCOMPARE(reference.peakRawPressure(), 0.08);
+        QVERIFY(reference.contactDuration() < 0.030);
+
+        WetStroke wet;
+        wet.begin(0, prototype());
+        for (const InkPoint &point : input)
+            wet.addPoint(point);
+        const Stroke stroke = wet.finish();
+        QVERIFY(stroke.isValid());
+        // Толщину точке по-прежнему даёт отфильтрованный пик (D5).
+        QCOMPARE(stroke.points.constLast().pressure, reference.peakPressure());
+    }
+
     // Сценарий «Касание с едва заметным сдвигом»: перо сдвинулось на 0.5 при
     // толщине 3 - капсула одной толщины, а не чёрточка с тонким заходом.
     void tinyMovementGivesCapsule()
@@ -289,13 +323,24 @@ private slots:
         for (const InkPoint &point : input)
             wet.addPoint(point);
         const qreal r = wet.tessellator().halfWidthAt({QPointF(), peak, 0.0});
-        // Во время касания: мокрая капсула уже толщиной по пику.
-        QPolygonF during;
-        for (const WetStroke::Vertex &vertex : wet.strip())
-            during.append(toPoint(vertex));
-        QVERIFY2(qAbs(during.boundingRect().height() - 2.0 * r) <= 0.05 * 2.0 * r,
-                 qPrintable(QStringLiteral("мокрая точка высотой %1, ждали %2")
-                                .arg(during.boundingRect().height()).arg(2.0 * r)));
+        // Во время касания: мокрая капсула уже толщиной по пику. Мокрая полоса -
+        // точка, только пока окончательная осевая вместе с провизорным хвостом
+        // короче толщины пера; при сдвиге 3.0 предсказание модели могло бы
+        // дотянуть хвост до толщины, и тогда во время касания это обычный
+        // штрих, а проверка точки - после отрыва, ниже.
+        QList<InkPoint> wetAxis = wet.points();
+        wetAxis.append(wet.provisionalPoints());
+        if (wet.tessellator().isDot(wetAxis)) {
+            QPolygonF during;
+            for (const WetStroke::Vertex &vertex : wet.strip())
+                during.append(toPoint(vertex));
+            QVERIFY2(qAbs(during.boundingRect().height() - 2.0 * r) <= 0.05 * 2.0 * r,
+                     qPrintable(QStringLiteral("мокрая точка высотой %1, ждали %2")
+                                    .arg(during.boundingRect().height()).arg(2.0 * r)));
+        } else {
+            QVERIFY2(shift >= 3.0,
+                     qPrintable(QStringLiteral("при сдвиге %1 мокрая полоса не точка").arg(shift)));
+        }
 
         const Stroke stroke = wet.finish();
         QVERIFY(stroke.isValid());
