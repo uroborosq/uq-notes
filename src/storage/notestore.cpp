@@ -284,16 +284,25 @@ bool NoteStore::ensureColumn(const QString &table, const QString &column,
                              const QString &definition)
 {
     QSqlQuery query(m_database);
-    if (!query.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table))) {
-        m_errorString = query.lastError().text();
+    const auto hasColumn = [&] {
+        if (!query.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table)))
+            return false;
+        while (query.next()) {
+            if (query.value(1).toString() == column) // колонки: cid, name, type, ...
+                return true;
+        }
         return false;
-    }
-    while (query.next()) {
-        if (query.value(1).toString() == column) // колонки: cid, name, type, ...
-            return true;
-    }
+    };
+    if (hasColumn())
+        return true;
     if (!query.exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 %3").arg(table, column, definition))) {
-        m_errorString = query.lastError().text();
+        const QString error = query.lastError().text();
+        // Второй экземпляр приложения мог открыть тот же файл и добавить колонку
+        // между нашими PRAGMA и ALTER: тогда ALTER падает с «duplicate column
+        // name», а миграция на деле уже сделана.
+        if (hasColumn())
+            return true;
+        m_errorString = error;
         return false;
     }
     return true;

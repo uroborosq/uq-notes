@@ -1004,6 +1004,30 @@ private slots:
         QCOMPARE(ink.allStrokes()[1].stroke.style, StrokeStyle::Legacy);
     }
 
+    // Второй экземпляр приложения открывает уже открытый файл схемы 3: колонка
+    // style на месте, и миграция считает это успехом, а не ошибкой.
+    void secondInstanceOpensSchemaThreeNote()
+    {
+        const QString pdf = copyFixture(fixtures::textbook(), QStringLiteral("af.pdf"));
+        const QString note = NoteStore::notePathFor(pdf);
+
+        InkDocument first;
+        NoteStore firstStore;
+        QVERIFY(firstStore.create(note, pdf));
+        firstStore.attach(&first);
+        Stroke stroke = lineOnPage(0);
+        stroke.style = StrokeStyle::Tapered;
+        first.addStroke(stroke);
+        QVERIFY(firstStore.flush());
+
+        InkDocument second;
+        NoteStore secondStore;
+        QVERIFY2(secondStore.openNote(note), qPrintable(secondStore.errorString()));
+        QVERIFY2(secondStore.load(&second), qPrintable(secondStore.errorString()));
+        QCOMPARE(second.strokeCount(), 1);
+        QCOMPARE(second.allStrokes().first().stroke.style, StrokeStyle::Tapered);
+    }
+
     // Задача 2.6, сценарий «Вкладыш на исчезнувшей странице».
     void keepsInsertsOnPagesThatNoLongerExist()
     {

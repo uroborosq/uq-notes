@@ -282,8 +282,8 @@ private slots:
         m_ink.loadStrokes(records, specs.size() + 1);
         QCOMPARE(m_canvas.inkGeometryStrokeCount(page), int(specs.size()));
 
-        // Прямая вдоль x с постоянным нажимом: вертикальный размах полосы - полная
-        // толщина, как бы ни были устроены торцы и стыки (шаги 2 и 3 их меняют).
+        // Прямая вдоль x с постоянным нажимом: вертикальный размах полосы -
+        // полная толщина штриха.
         for (int i = 0; i < specs.size(); ++i) {
             const QVector<StrokeTessellator::Vertex> strip =
                 m_canvas.inkGeometryStrip(page, quint64(i + 1));

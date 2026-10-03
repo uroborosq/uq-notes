@@ -80,6 +80,10 @@ private slots:
         for (const InkDocument::Record &record : ink.allStrokes()) {
             QVERIFY(record.stroke.isValid());
             QCOMPARE(record.stroke.points.size(), 25);
+            // Писатель делает заострённым каждый второй штрих; id штрихов идут
+            // с 1, так что заострены чётные.
+            QCOMPARE(record.stroke.style,
+                     record.id % 2 == 0 ? StrokeStyle::Tapered : StrokeStyle::Legacy);
         }
 
         QCOMPARE(store.sourceState(), NoteStore::SourceState::Ok);
@@ -124,6 +128,8 @@ private slots:
         for (const InkDocument::Record &record : strokes) {
             QCOMPARE(record.stroke.insert, insert.id);
             QCOMPARE(record.stroke.points.size(), 25);
+            QCOMPARE(record.stroke.style,
+                     record.id % 2 == 0 ? StrokeStyle::Tapered : StrokeStyle::Legacy);
         }
     }
 };

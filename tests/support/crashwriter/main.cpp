@@ -55,6 +55,9 @@ int main(int argc, char *argv[])
         stroke.page = counter % 12;
         stroke.insert = insert;
         stroke.width = 2.0;
+        // Каждый второй штрих - заострённый: восстановление после сбоя
+        // проверяет и колонку закона толщины (ink-beauty-pass, D3).
+        stroke.style = counter % 2 == 1 ? StrokeStyle::Tapered : StrokeStyle::Legacy;
         for (int i = 0; i <= 24; ++i)
             stroke.points.append({QPointF(20 + i * 3.0, 40 + counter % 400), 0.5, i / 200.0});
         ink->addStroke(stroke);
