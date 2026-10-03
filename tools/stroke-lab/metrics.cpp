@@ -515,6 +515,8 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
     Stats widthStartErr, widthEndErr, widthBodyErr, widthCv, widthCvGt;
     double widthStepMax = Stats::kNone, widthStepMaxGt = Stats::kNone;
     int facetCount = 0;
+    int falseCuspCount = 0;
+    double toothPeak = 0.0;
     int mutations = 0;
     int finalVertices = 0;
     int centerPoints = 0;
@@ -607,6 +609,29 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
                 turn.add(std::abs(th[i]) * 180.0 / M_PI);
                 if (f > 2.0)
                     ++facetCount;
+            }
+            // Ложные острия (design.md, D6): поворот осевой круче 45° дальше 2 px
+            // от любой эталонной вершины с поворотом круче 45°. Концы штриха
+            // (2 px) не считаются: там дотяжка до точки отрыва даёт крючок.
+            for (size_t i = 1; i + 1 < c.size(); ++i) {
+                if (arc[i] < 2.0 || total - arc[i] < 2.0 || nearAny(c[i], corners, 2.0))
+                    continue;
+                if (std::abs(th[i]) > M_PI / 4.0) {
+                    ++falseCuspCount;
+                    if (qEnvironmentVariableIsSet("STROKE_LAB_DEBUG_CUSPS"))
+                        std::fprintf(stderr, "cusp %s stroke %zu at (%.2f,%.2f): %.1f deg\n",
+                                     sample.id.c_str(), si, c[i].x(), c[i].y(),
+                                     std::abs(th[i]) * 180.0 / M_PI);
+                }
+            }
+        }
+
+        // Зубец короче кадра: насколько осевая поднялась над прямой у вершины.
+        if (sample.toothAmplitude > 0.0) {
+            const double baselineY = sample.toothApex.y() + sample.toothAmplitude;
+            for (const QPointF &p : center) {
+                if (std::abs(p.x() - sample.toothApex.x()) < 6.0)
+                    toothPeak = std::max(toothPeak, baselineY - p.y());
             }
         }
 
@@ -948,6 +973,9 @@ QJsonObject computeMetrics(const Sample &sample, const std::vector<StrokeRun> &r
     m["facet_max_deg"] = r(facet.max());
     m["facet_p99_deg"] = r(facet.pct(0.99));
     m["turn_max_deg"] = r(turn.max());
+    m["false_cusp_count"] = falseCuspCount;
+    if (sample.toothAmplitude > 0.0)
+        m["tooth_peak_ratio"] = r(toothPeak / sample.toothAmplitude, 4);
     m["curvature_tv_per100px"] = r(curvLen > 0 ? curvTv / curvLen * 100.0 : Stats::kNone);
     m["curvature_tv_truth_per100px"] = r(curvLenGt > 0 ? curvTvGt / curvLenGt * 100.0 : Stats::kNone);
     {

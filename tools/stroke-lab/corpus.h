@@ -44,6 +44,10 @@ struct Sample
     std::vector<SampleStroke> strokes;
     std::vector<QPointF> corners;  // эталонные вершины острых углов, px
     QRectF bounds;                 // охват эталона, px
+    // Зубец короче кадра (сэмпл tooth_240): вершина зубца и его высота над
+    // прямой, px. Высота 0 - зубца в сэмпле нет.
+    QPointF toothApex;
+    double toothAmplitude = 0.0;
 
     bool hasTag(const std::string &tag) const;
 };

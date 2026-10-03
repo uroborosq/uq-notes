@@ -589,6 +589,11 @@ struct Spec
     double size;
     std::vector<Shape> strokes;
     Motion motion;
+    // Частота пера, если не та, что у корпуса; 0 - CorpusOptions::rateHz.
+    double rateHz = 0.0;
+    // Эталонные вершины острий, которых нет между частями (острие внутри
+    // части - разворот без остановки), в координатах фигуры.
+    std::vector<QPointF> extraCorners;
 };
 
 Sample realize(const Spec &spec, uint64_t seed, const CorpusOptions &options)
@@ -609,6 +614,12 @@ Sample realize(const Spec &spec, uint64_t seed, const CorpusOptions &options)
                 minY = std::min(minY, p.y());
             }
 
+    CorpusOptions sampling = options;
+    if (spec.rateHz > 0.0)
+        sampling.rateHz = spec.rateHz;
+    for (const QPointF &corner : spec.extraCorners)
+        sample.corners.push_back(corner + QPointF(16.0 - minX, 16.0 - minY));
+
     double t = 0.0;
     for (const Shape &raw : spec.strokes) {
         Shape s = raw;
@@ -622,7 +633,7 @@ Sample realize(const Spec &spec, uint64_t seed, const CorpusOptions &options)
         stroke.truth = timeParameterize(s, m, t, rng);
         if (stroke.truth.p.size() < 2)
             continue;
-        sampleEvents(stroke, m, options, 7300.0 + seed * 10.0, rng);
+        sampleEvents(stroke, m, sampling, 7300.0 + seed * 10.0, rng);
         if (stroke.events.size() < 2) {
             continue;
         }
@@ -636,6 +647,55 @@ Sample realize(const Spec &spec, uint64_t seed, const CorpusOptions &options)
             bounds = bounds.isNull() ? QRectF(p, QSizeF(1e-3, 1e-3))
                                      : bounds.united(QRectF(p, QSizeF(1e-3, 1e-3)));
     sample.bounds = QRectF(0, 0, std::ceil(bounds.right() + 16.0), std::ceil(bounds.bottom() + 16.0));
+    return sample;
+}
+
+// Ломаная одной частью, плотно (шаг 0.05 px): её вершины - развороты без
+// остановки пера. Скорость в них падает только по закону 2/3 (до 0.35 от
+// крейсерской), а не до нуля, как в остриях между частями.
+Shape densePolyline(const QList<QPointF> &points)
+{
+    std::vector<QPointF> dense;
+    for (int i = 0; i + 1 < points.size(); ++i) {
+        const QPointF a = points[i];
+        const QPointF b = points[i + 1];
+        const int steps = std::max(1, int(std::ceil(len(b - a) / 0.05)));
+        for (int k = 0; k < steps; ++k)
+            dense.push_back(a + (b - a) * (double(k) / steps));
+    }
+    dense.push_back(points.constLast());
+    Shape shape;
+    shape.parts.push_back(dense);
+    return shape;
+}
+
+// Зубец короче кадра - ровно эталон tst_strokesampler::toothShorterThanFrameSurvives:
+// один отсчёт на 240 Гц уходит вверх на 3 px. Без тремора и шума датчика,
+// метки времени - те же, что в тесте.
+Sample toothSample()
+{
+    const reference::ToothStroke tooth = reference::toothShorterThanFrame();
+    Sample sample;
+    sample.id = "tooth_240";
+    sample.title = "Зубец 3 px в один отсчёт, 300 px/s, 240 Гц";
+    sample.tags = {"tooth"};
+    sample.size = tooth.amplitude;
+    SampleStroke stroke;
+    double maxX = 0.0, maxY = 0.0;
+    for (const InkPoint &p : tooth.points) {
+        stroke.events.push_back(p);
+        stroke.eventTrueTime.push_back(p.timeSeconds);
+        stroke.truth.t.push_back(p.timeSeconds);
+        stroke.truth.p.push_back(p.position);
+        stroke.truth.pressure.push_back(p.pressure);
+        stroke.truth.speed.push_back(300.0);
+        maxX = std::max(maxX, p.position.x());
+        maxY = std::max(maxY, p.position.y());
+    }
+    sample.strokes.push_back(std::move(stroke));
+    sample.toothApex = tooth.apex;
+    sample.toothAmplitude = tooth.amplitude;
+    sample.bounds = QRectF(0, 0, std::ceil(maxX + 16.0), std::ceil(maxY + 16.0));
     return sample;
 }
 
@@ -785,9 +845,24 @@ std::vector<Sample> buildCorpus(const CorpusOptions &options)
                          motion(60, 4, 0.12, 61)});
     }
 
+    // Острия без стоянки пера (гейт D6): «N» эталона, перо разворачивается на
+    // ходу, на частотах 240 и 481 Гц.
+    for (const double rate : {240.0, 481.0}) {
+        const QList<QPointF> n = reference::cornerN();
+        Spec spec{rate < 300.0 ? "corner_N_nostop_240" : "corner_N_nostop_481",
+                  rate < 300.0 ? "«N» без стоянки в остриях, 600 px/s, 240 Гц"
+                               : "«N» без стоянки в остриях, 600 px/s, 481 Гц",
+                  {"corner", "nostop"}, 80, {densePolyline(n)},
+                  motion(600, 40, 0.12, rate < 300.0 ? 34 : 35)};
+        spec.rateHz = rate;
+        spec.extraCorners = {n[1], n[2]};
+        specs.push_back(spec);
+    }
+
     std::vector<Sample> samples;
     for (const Spec &spec : specs)
         samples.push_back(realize(spec, spec.motion.seed, options));
+    samples.push_back(toothSample());
     return samples;
 }
 

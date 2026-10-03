@@ -376,3 +376,18 @@ GPU-замер `aa-gpu-bench` (`exp/antialias`, `gpu/`) рисует полос�
 
 Гейт шага 1: `w track` у `app-legacy` ≤ 0.03; заход `baseline` при 0.08 ≤ 15.5
 px; конец - в пределах 0.05 от эталона.
+
+## Гейт D6 (ink-beauty-pass)
+
+Узел острия в нарезке и окно [1, 2, 1]/4 на входе следования
+(`variants/d6_raw121_cusp.cpp`) проверяются против приложения без них:
+
+```sh
+./build/tools/stroke-lab/stroke-lab --variants baseline,d6-copy,d6-raw121-cusp --no-png --out /tmp/uq-gate-d6
+python3 tools/stroke-lab/gate_d6.py /tmp/uq-gate-d6
+```
+
+`d6-copy` - копия сэмплера без правок, сверка того, что копия не разошлась с
+приложением. Ложные острия - `false_cusp_count`, острие без стоянки пера -
+`corner_N_nostop_240/481`, зубец короче кадра - `tooth_240`
+(`tooth_peak_ratio`). На шаге 2 ink-beauty-pass гейт не пройден (design.md, D6).
