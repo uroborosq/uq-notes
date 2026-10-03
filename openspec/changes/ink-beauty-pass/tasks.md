@@ -113,7 +113,7 @@ Sql, Test), ink-stroke-modeler, Wayland `wp_presentation`, CMake/Ninja.
   ни на бит, но средние по корпусу сдвигаются, поэтому числа design.md
   сверяются по прежнему списку из 27 сэмплов.
 
-- [ ] 1.1 **Проверить исходное состояние.** Рабочее дерево чистое (кроме неотслеживаемого `.claude/worktrees/`), ветка `ink-beauty-pass`, ветки прототипов на месте.
+- [x] 1.1 **Проверить исходное состояние.** Рабочее дерево чистое (кроме неотслеживаемого `.claude/worktrees/`), ветка `ink-beauty-pass`, ветки прототипов на месте.
 ```sh
 cd /home/dmitriy.tikhomirov/desktop/owned/uq-notes
 git status --short                       # ожидание: только "?? .claude/worktrees/"
@@ -127,7 +127,7 @@ for b in rnote outline google-ink trajectory apps-survey latency dry-refine anti
 pkg-config --exists libqpdf && echo qpdf-ok   # нужен для сборки из корня; без него см. 1.3
 ```
 
-- [ ] 1.2 **Перенести стенд cherry-pick'ом без коммита.**
+- [x] 1.2 **Перенести стенд cherry-pick'ом без коммита.**
 ```sh
 git cherry-pick --no-commit 720b497
 git diff --cached --stat | tail -1   # ожидание: 14 files changed, 2957 insertions(+)
@@ -147,7 +147,7 @@ option(UQ_BUILD_STROKE_LAB "Build the offline stroke lab" OFF)
 ```
   Блок `if(UQ_BUILD_STROKE_LAB) add_subdirectory(tools/stroke-lab) endif()` после `add_subdirectory(src)` остаётся как пришёл. `git add CMakeLists.txt`.
 
-- [ ] 1.3 **Собрать стенд из основного дерева.**
+- [x] 1.3 **Собрать стенд из основного дерева.**
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUQ_BUILD_STROKE_LAB=ON
 cmake --build build -j$(nproc) --target stroke-lab
@@ -155,7 +155,7 @@ ls build/tools/stroke-lab/stroke-lab    # ожидание: файл есть
 ```
   Ожидание: конфигурация и сборка без ошибок. Если `cmake` падает на `pkg_check_modules(QPDF ...)` (на машине нет `libqpdf`), это не стенд: поставить `qpdf` (`sudo pacman -S qpdf`). Пока его нет, стенд проверяется отдельной сборкой `cmake -S tools/stroke-lab -B build-lab -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build-lab`, а во всех командах ниже `build/tools/stroke-lab/` заменяется на `build-lab/`.
 
-- [ ] 1.4 **Гейт: baseline 720b497 воспроизводит числа design.md.**
+- [x] 1.4 **Гейт: baseline 720b497 воспроизводит числа design.md.**
 ```sh
 SAMPLES=ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello
 rm -rf /tmp/lab-720b497
@@ -178,7 +178,7 @@ EOF
 ```
   Ожидание: `cpu us/event` около 2.2 (зависит от машины; в песочнице 2.19) и `OK`. `/tmp/lab-720b497/summary.json` не удалять: это эталон для 1.16. При `FAIL` дальше не идти: стенд или `src/ink` расходятся с 720b497 (проверить `git diff 720b497 -- tools/stroke-lab src/ink`, ожидание - пусто).
 
-- [ ] 1.5 **Промежуточный коммит.**
+- [x] 1.5 **Промежуточный коммит.**
 ```sh
 git commit -F - <<'EOF'
 Стенд stroke-lab в основном дереве

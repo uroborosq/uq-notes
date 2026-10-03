@@ -15,6 +15,10 @@ option(UQ_BUILD_TESTS "Build the test suite" ON)
 # Сценарный ввод и снимки экрана: нужны для замеров и проверки сценариев без
 # человека у экрана. В пакет не входят.
 option(UQ_DIAGNOSTICS "Build scripted-input and screenshot hooks" ON)
+# Офлайн-стенд сравнения конвейеров чернил (tools/stroke-lab): метрики, по
+# которым принимаются решения ink-beauty-pass. В пакет не входит, поэтому по
+# умолчанию выключен; можно собрать и отдельно: cmake -S tools/stroke-lab.
+option(UQ_BUILD_STROKE_LAB "Build the offline stroke lab" OFF)
 
 include(GNUInstallDirs)
 
@@ -24,6 +28,10 @@ endif()
 
 add_subdirectory(third_party)
 add_subdirectory(src)
+
+if(UQ_BUILD_STROKE_LAB)
+    add_subdirectory(tools/stroke-lab)
+endif()
 
 if(UQ_BUILD_TESTS)
     add_subdirectory(spikes)
