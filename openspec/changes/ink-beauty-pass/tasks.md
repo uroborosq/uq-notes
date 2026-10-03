@@ -3412,7 +3412,7 @@ include-ом.
 - Modify: `tools/stroke-lab/variants/baseline.cpp`, `tools/stroke-lab/README.md`,
   `CMakeLists.txt`, `packaging/PKGBUILD`
 
-- [ ] 5.1 **Конвейер приложения с законом в параметре.** Создать
+- [x] 5.1 **Конвейер приложения с законом в параметре.** Создать
   `tools/stroke-lab/variants/app_pipeline.h`:
 
   ```cpp
@@ -3521,7 +3521,7 @@ include-ом.
   } // namespace lab
   ```
 
-- [ ] 5.2 **`baseline` - приложение как есть, с Tapered.** Заменить
+- [x] 5.2 **`baseline` - приложение как есть, с Tapered.** Заменить
   `tools/stroke-lab/variants/baseline.cpp` целиком:
 
   ```cpp
@@ -3553,7 +3553,7 @@ include-ом.
   `git diff exp/stroke-lab -- tools/stroke-lab/variants/baseline.cpp`), перенести
   их в `AppPipeline`.
 
-- [ ] 5.3 **Вариант `app-legacy`.** Создать
+- [x] 5.3 **Вариант `app-legacy`.** Создать
   `tools/stroke-lab/variants/step1_pressure.cpp`:
 
   ```cpp
@@ -3581,11 +3581,11 @@ include-ом.
                      "законе, сравнивать при --min-width-factor 0.25");
   ```
 
-- [ ] 5.4 **Сборка стенда.**
+- [x] 5.4 **Сборка стенда.**
   `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DUQ_BUILD_STROKE_LAB=ON && cmake --build build -j$(nproc) && ./build/tools/stroke-lab/stroke-lab --list | grep -E '^ *(baseline|app-legacy)'`
   Ожидается: сборка без ошибок, в списке оба варианта.
 
-- [ ] 5.5 **Гейт A: давление на законе 0.25.**
+- [x] 5.5 **Гейт A: давление на законе 0.25.**
 
   ```sh
   OUT=$(mktemp -d)
@@ -3616,7 +3616,7 @@ include-ом.
   `followedNode` или сырое давление в `finish`); константы фильтра не
   подгонять без записи в design.md, D2.
 
-- [ ] 5.6 **Гейт B: заострение на законе 0.08.**
+- [x] 5.6 **Гейт B: заострение на законе 0.08.**
 
   ```sh
   ./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline --min-width-factor 0.08 --no-png --out $OUT/law008
@@ -3642,7 +3642,7 @@ include-ом.
   доходит до `WetStroke`: `CenterPoint.width` стенда берётся из мокрого
   тесселятора).
 
-- [ ] 5.7 **Команды шага 1 в README стенда.** Дописать в конец
+- [x] 5.7 **Команды шага 1 в README стенда.** Дописать в конец
   `tools/stroke-lab/README.md`:
 
   ````markdown
@@ -3670,7 +3670,7 @@ include-ом.
   px; конец - в пределах 0.05 от эталона.
   ````
 
-- [ ] 5.8 **Коммит стенда.**
+- [x] 5.8 **Коммит стенда.**
 
   ```sh
   git add tools/stroke-lab/variants/app_pipeline.h tools/stroke-lab/variants/baseline.cpp \

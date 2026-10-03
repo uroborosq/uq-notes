@@ -87,6 +87,10 @@ SAMPLES=ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref
 | µs/ev | `cpu_us_per_event_mean@mean` | около 2.2 (зависит от машины) |
 
 Всё, кроме `µs/ev`, детерминировано и должно совпасть до последнего знака.
+Таблица снята на baseline шага 0. С шага 1 (версия 0.8.0) baseline рисует
+законом Tapered с новым давлением, и до знака с ней совпадают только столбцы
+траектории: dev, corner, facets, curvTV, small H%, gap22, mut. Толщина и AA -
+в разделе «Шаг 1 ink-beauty-pass» в конце файла.
 
 ## Что получается в `--out`
 
@@ -317,7 +321,9 @@ GPU-замер `aa-gpu-bench` (`exp/antialias`, `gpu/`) рисует полос�
 
 ## Как добавить вариант
 
-1. Скопируйте `variants/baseline.cpp` в `variants/<имя>.cpp`.
+1. Скопируйте конвейер приложения `lab::AppPipeline` из
+   `variants/app_pipeline.h` в `variants/<имя>.cpp` (`baseline.cpp` только
+   регистрирует его с законом Tapered).
 2. Реализуйте `lab::Variant` (`lab.h`):
    - `begin(StrokeSetup)` - масштаб, толщина, цвет на касании;
    - `addEvent(InkPoint)` - отсчёт в точках страницы с давлением и временем;
@@ -340,3 +346,25 @@ GPU-замер `aa-gpu-bench` (`exp/antialias`, `gpu/`) рисует полос�
 параметры. Ограничения приложения, которые вариант должен уважать: в `.uqn`
 хранятся только `x, y, pressure` (без времени); окончательные точки не
 меняются; работа на событие не растёт с длиной штриха.
+
+## Шаг 1 ink-beauty-pass: давление и закон толщины
+
+`baseline` с шага 1 рисует законом Tapered `W·(0.08 + 0.92p)`, как
+приложение рисует новые штрихи; его толщину сравнивать с эталоном при
+`--min-width-factor 0.08`. `app-legacy` - тот же конвейер с прежним законом
+`W·(0.25 + 0.75p)`: на нём сняты числа D2.
+
+```sh
+./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline,app-legacy --no-png --out /tmp/lab/law025
+./build/tools/stroke-lab/stroke-lab --samples ref_line,ref_loop,ref_zigzag,ref_spiral,ref_letter_e,ref_fast_circle,ref_corner_v,ref_corner_n,ref_cardiogram,word_minimum,word_hello,word_privet,digits_2025,word_minimum_small,small_o_8,small_o_12,small_o_20,small_a_12,small_e_10,corner_N,corner_M,corner_check,fast_eeee,fast_scribble,slow_line_tremor,slow_arc_tremor,slow_hello --variants baseline --min-width-factor 0.08 --no-png --out /tmp/lab/law008
+```
+
+| метрика (масштаб 1) | baseline шага 0 | app-legacy, закон 0.25 | baseline, закон 0.08 | эталон 0.25 / 0.08 |
+|---|---|---|---|---|
+| отслеживание толщины (`w track`) | 0.163 | 0.024 | 0.034 | - |
+| средняя толщина к эталону | 0.926 | 1.002 | 1.002 | 1 |
+| заход до 90% плато, px | 36.4 | 11.4 | 15.0 | 5.9 / 13.7 |
+| толщина у конца к медиане | 0.95 | 0.70 | 0.57 | 0.68 / 0.544 |
+
+Гейт шага 1: `w track` у `app-legacy` ≤ 0.03; заход `baseline` при 0.08 ≤ 15.5
+px; конец - в пределах 0.05 от эталона.
