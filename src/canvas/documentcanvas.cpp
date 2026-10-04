@@ -116,8 +116,8 @@ struct InkLayerNodes
 };
 
 // Узел страницы: собственная система координат страницы, заполнитель под
-// текстурой и сама текстура. Индекс страницы хранится в узле, чтобы карта
-// «страница -> узел» переживала пересоздание графа сцены.
+// текстурой и сама текстура. Какой странице он служит, знает только карта
+// DocumentCanvas::m_nodes: узел из запаса переходит от страницы к странице.
 class PageSceneNode : public QSGTransformNode
 {
 public:
@@ -134,11 +134,6 @@ public:
         WetInkLayer,
     };
 
-    explicit PageSceneNode(int page)
-        : page(page)
-    {
-    }
-
     // Включает ребёнка в узел на место его слоя.
     void addToLayer(QSGNode *child, Layer layer)
     {
@@ -151,7 +146,6 @@ public:
         appendChildNode(child);
     }
 
-    int page = -1;
     QSGSimpleRectNode *placeholder = nullptr;
     QSGSimpleTextureNode *texture = nullptr;
 
@@ -1196,11 +1190,10 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         PageSceneNode *node = m_nodes.value(page);
         if (!node && !m_spareNodes.isEmpty()) {
             node = m_spareNodes.takeLast();
-            node->page = page;
             m_nodes.insert(page, node);
         }
         if (!node) {
-            node = new PageSceneNode(page);
+            node = new PageSceneNode;
             m_pagesRoot->appendChildNode(node);
             m_nodes.insert(page, node);
         }
@@ -1322,7 +1315,6 @@ void DocumentCanvas::parkPageNode(PageSceneNode *node)
     ink.wetUsedChunks = 0;
     ink.wetStrokeSerial = -1;
     ink.wetSettledCount = 0;
-    node->page = -1;
     m_spareNodes.append(node);
 }
 
