@@ -740,6 +740,40 @@ private slots:
         QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 3);
     }
 
+    // Перо прижато и стоит дольше паузы переноса: это не простой, недавние
+    // штрихи остаются в слотах до отрыва.
+    void heldPenDoesNotFlushRecentInk()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 1);
+
+        QVERIFY(canvas->beginInkAt(QPointF(350, 400), 0.6, false));
+        QElapsedTimer held;
+        held.start();
+        while (held.elapsed() < 900) {
+            QTest::qWait(20);
+            renderFrames(&fixture.window, 1);
+        }
+        QVERIFY(canvas->isDrawing());
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 0);
+        QVERIFY(canvas->recentInkFlushScheduled());
+
+        canvas->cancelInk();
+        QVERIFY(renderUntil(&fixture.window, [canvas] {
+            return canvas->inkMaterialStats(0).recentNodes == 0;
+        }, 3000));
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 1);
+    }
+
     // Слотов не хватило - всё недавнее переезжает в сухой слой сразу, ни один
     // штрих не теряется и не двоится.
     void recentOverflowMovesToDryAtOnce()

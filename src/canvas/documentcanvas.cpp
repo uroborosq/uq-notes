@@ -304,6 +304,11 @@ DocumentCanvas::DocumentCanvas(QQuickItem *parent)
     m_recentFlushTimer.setSingleShot(true);
     m_recentFlushTimer.setInterval(kRecentFlushMs);
     connect(&m_recentFlushTimer, &QTimer::timeout, this, [this] {
+        // Перо прижато и стоит - это не простой: перенос подождёт отрыва.
+        if (m_wet.isActive()) {
+            m_recentFlushTimer.start();
+            return;
+        }
         m_flushRecentRequested = true;
         update();
     });
