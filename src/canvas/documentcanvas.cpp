@@ -104,6 +104,9 @@ struct InkLayerNodes
     std::unique_ptr<InkNodePool> wet;
     // Сколько кусков пула заняты нынешним штрихом; остальные пусты.
     int wetUsedChunks = 0;
+    // Сколько кусков занимал самый длинный штрих поверхности: по нему пул
+    // растёт заранее, в кадре переноса недавних штрихов.
+    int wetHighWater = 0;
     // Номер штриха, который лежит в кусках: по нему виден новый штрих, даже
     // если между отрывом и касанием не было кадра.
     int wetStrokeSerial = -1;
@@ -233,10 +236,14 @@ namespace {
 // вершины): треугольник i - это вершины i, i+1, i+2.
 constexpr int kWetChunkVertices = 512;
 constexpr int kWetChunkOverlap = 2;
-// Кусков в пуле мокрого слоя с самого начала: около 2000 вершин, обычный
-// штрих рукописи короче. Длинный штрих удваивает пул, и узлы добавляются
-// только при первом таком переполнении на поверхности.
-constexpr int kWetPoolInitialChunks = 4;
+// Кусков в пуле мокрого слоя с самого начала: около 4000 вершин - штрих в
+// 3-4 с непрерывного письма; штрих рукописи много короче. Рост пула - это
+// добавление узлов под корнем батча страницы, то есть перезаливка её
+// слитого батча сухих чернил (на плотной странице 28 МБ, около 20 мс
+// рендера). Поэтому пул растёт заранее, в кадре переноса недавних штрихов,
+// который перезаливает этот батч и так (appendToDryInk), а посреди штриха -
+// только если штрих длиннее всего пула.
+constexpr int kWetPoolInitialChunks = 8;
 
 // Слотов недавних штрихов на поверхность. Переполнение - немедленный перенос
 // в сухой слой, редкий всплеск: столько штрихов без паузы в 0.7 с не пишут.
@@ -1313,6 +1320,7 @@ void DocumentCanvas::parkPageNode(PageSceneNode *node)
             ink.wet->clear(index);
     }
     ink.wetUsedChunks = 0;
+    ink.wetHighWater = 0;
     ink.wetStrokeSerial = -1;
     ink.wetSettledCount = 0;
     m_spareNodes.append(node);
@@ -1360,6 +1368,12 @@ void DocumentCanvas::appendToDryInk(InkLayerNodes &layer, const QList<StrokeGeom
     for (int slot = 0; slot < layer.recentIds.size(); ++slot)
         layer.recent->clear(slot);
     layer.recentIds.clear();
+    // Батч страницы в этом кадре перезаливается всё равно: здесь же пул
+    // мокрого слоя дорастает до вдвое большего, чем занимал самый длинный
+    // штрих, если тот занимал больше половины пула. Такой же штрих потом
+    // узлов не добавит.
+    if (layer.wet && 2 * layer.wetHighWater > layer.wet->size())
+        layer.wet->grow(2 * layer.wetHighWater);
     ++m_dryInkNodeRebuilds;
 }
 
@@ -1479,6 +1493,7 @@ void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active)
         pool.grow(qMax(needed, 2 * pool.size()));
     const int previouslyUsed = layer.wetUsedChunks;
     layer.wetUsedChunks = needed;
+    layer.wetHighWater = qMax(layer.wetHighWater, needed);
 
     // Перезаливается всё, начиная с куска, где на прошлом кадре кончалась
     // окончательная часть полосы: до неё вершины не меняются никогда, а после

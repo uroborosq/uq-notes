@@ -506,11 +506,13 @@ private slots:
         QCOMPARE(canvas->wetInkCoveredVertexCount(0), -1);
 
         qreal time = 3.0;
+        // Отсчёты гуще по x - полоса длиннее: 800 отсчётов - больше 8 кусков
+        // начального пула.
         const auto stroke = [&](qreal y, int samples) {
             QVERIFY(canvas->beginInkAt(QPointF(300, y), 0.6, false, time));
             for (int i = 1; i <= samples; ++i) {
                 time += 1.0 / 240.0;
-                canvas->continueInkAt(QPointF(300 + i * 0.9, y + 30.0 * std::sin(i / 5.0)), 0.6,
+                canvas->continueInkAt(QPointF(300 + i * 0.45, y + 30.0 * std::sin(i / 5.0)), 0.6,
                                       time);
             }
             renderFrames(&fixture.window, 1);
@@ -528,7 +530,7 @@ private slots:
         QCOMPARE(canvas->inkMaterialStats(0).wetPoolNodes, pool);
 
         // Длинный штрих переполняет пул: он растёт один раз.
-        stroke(480, 400);
+        stroke(480, 800);
         const int strip = canvas->wetStripVertexCount();
         const int grown = canvas->inkMaterialStats(0).wetPoolNodes;
         QVERIFY(grown > pool);
@@ -538,7 +540,7 @@ private slots:
         QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 0);
 
         // Такой же следующий штрих рисуется опустевшими кусками того же пула.
-        stroke(560, 400);
+        stroke(560, 800);
         const DocumentCanvas::InkMaterialStats second = canvas->inkMaterialStats(0);
         QVERIFY(second.wetNodes > 1);
         QCOMPARE(second.wetPoolNodes, grown);

@@ -28,6 +28,7 @@
 
 #include <rhi/qrhi.h>
 
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -579,6 +580,61 @@ private slots:
         }
         QVERIFY2(worst <= 2,
                  qPrintable(QStringLiteral("перенос изменил картинку на %1/255").arg(worst)));
+    }
+
+    // Длинный штрих на плотной странице занимает шесть кусков мокрого слоя -
+    // больше, чем было в пуле 0.10.0 (4). Ни одно событие пера не
+    // перезаливает сухой батч, в том числе первые заполнения кусков. Прежде
+    // пятый кусок рос пул - добавлял узлы под корнем батча страницы, и её
+    // батч в 28 МБ перезаливался посреди штриха, около 20 мс рендера
+    // (ink-beauty-pass, прокси-замеры группы 14). Затем перенос недавних
+    // штрихов заранее растит пул вдвое против самого длинного штриха.
+    void longStrokeNeverReuploadsDryBatch()
+    {
+        UploadLog log;
+        DensePage dense(log);
+        QVERIFY(dense.fixture.open(fixtures::large()));
+        if (!dense.fixture.scene.initialize())
+            QSKIP("RHI недоступен на этой платформе (программный бэкенд)");
+        QVERIFY2(dense.prepare(), qPrintable(dense.error));
+        OffscreenScene &scene = dense.fixture.scene;
+        DocumentCanvas *canvas = dense.fixture.canvas;
+
+        const QPointF from(300, 470);
+        QVERIFY(dense.touch(from));
+        int sample = 0;
+        int dryEvents = 0;
+        int maxChunks = 0;
+        constexpr int kChunks = 6;
+        while (canvas->inkMaterialStats(0).wetNodes < kChunks && sample < 4000) {
+            log.clear();
+            for (int k = 0; k < 4; ++k) {
+                ++sample;
+                dense.time += 1.0 / 240.0;
+                canvas->continueInkAt(
+                    from + QPointF(sample * 0.25, 25.0 * std::sin(sample / 4.0)), 0.6, dense.time);
+            }
+            scene.frame();
+            QVERIFY(log.uploadedElements(dense.wet) > 0);
+            if (log.uploadedElements(dense.dry) > 0) {
+                ++dryEvents;
+                qWarning("перезалит сухой батч на %d-м отсчёте, кусков %d", sample,
+                         canvas->inkMaterialStats(0).wetNodes);
+            }
+            maxChunks = qMax(maxChunks, canvas->inkMaterialStats(0).wetNodes);
+        }
+        QCOMPARE(maxChunks, kChunks);
+        QCOMPARE(dryEvents, 0);
+        const int poolBefore = canvas->inkMaterialStats(0).wetPoolNodes;
+        canvas->endInk();
+        scene.frames(2);
+
+        // Перенос по простою растит пул заранее: вдвое против 6 кусков.
+        canvas->flushRecentInk();
+        scene.frames(2);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 0);
+        QVERIFY(canvas->inkMaterialStats(0).wetPoolNodes >= 2 * kChunks);
+        QVERIFY(canvas->inkMaterialStats(0).wetPoolNodes >= poolBefore);
     }
 
     // Пустой слот пула оживает со штрихом. Пустой элемент батча не имеет, а
