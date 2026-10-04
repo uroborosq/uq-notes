@@ -2,10 +2,14 @@
 // скруглением стыков. На эталонных траекториях с резкими изгибами и петлями
 // проверяется отсутствие артефактов - разрывов на стыках и выбросов геометрии.
 
+#include <QImage>
 #include <QLineF>
+#include <QPainter>
+#include <QPainterPath>
 #include <QTest>
 
 #include "ink/stroketessellator.h"
+#include "ink/wetstroke.h"
 #include "support/referencestrokes.h"
 
 namespace {
@@ -37,15 +41,86 @@ bool insideTriangle(const QPointF &p, const QPointF &a, const QPointF &b, const 
     return !(negative && positive);
 }
 
-// Покрыта ли точка полосой. Разрыв на стыке - это как раз точка средней линии,
-// которая ничем не покрыта.
+// Покрыта ли точка невырожденным треугольником полосы. Вырожденные
+// треугольники - (C, Ok, C) между вершинами веера, (C, L, R) у торца - это
+// отрезки из центра: точка на таком отрезке оказалась бы «покрытой» и без
+// веера.
 bool stripCovers(const QVector<Vertex> &strip, const QPointF &point)
 {
     for (int i = 0; i + 2 < strip.size(); ++i) {
-        if (insideTriangle(point, toPoint(strip[i]), toPoint(strip[i + 1]), toPoint(strip[i + 2])))
+        const QPointF a = toPoint(strip[i]);
+        const QPointF b = toPoint(strip[i + 1]);
+        const QPointF c = toPoint(strip[i + 2]);
+        const QPointF ab = b - a;
+        const QPointF ac = c - a;
+        if (std::abs(ab.x() * ac.y() - ab.y() * ac.x()) < 1e-9)
+            continue;
+        if (insideTriangle(point, a, b, c))
             return true;
     }
     return false;
+}
+
+QPointF unit(const QPointF &v)
+{
+    const qreal length = std::hypot(v.x(), v.y());
+    return length < 1e-9 ? QPointF() : v / length;
+}
+
+QPointF normalOf(const QPointF &direction)
+{
+    return QPointF(-direction.y(), direction.x());
+}
+
+// Точки, которые полоса обязана покрыть: ось, смещённая на ±0.5·hw - в
+// стыках по биссектрисе нормалей, в серединах сегментов по нормали, у концов
+// ещё и назад за начало и вперёд за конец, по направлению торца. Сама ось
+// для этого не годится: в каждой её точке у резкого стыка и торца стоит
+// центр веера, и она «покрыта» при любом веере.
+QList<QPointF> coverageProbes(const QList<InkPoint> &points, const StrokeTessellator &tessellator)
+{
+    QList<QPointF> directions;
+    QPointF previous(1.0, 0.0);
+    for (int i = 0; i + 1 < points.size(); ++i) {
+        QPointF direction = unit(points[i + 1].position - points[i].position);
+        if (direction.isNull())
+            direction = previous;
+        directions.append(direction);
+        previous = direction;
+    }
+
+    QList<QPointF> probes;
+    const int last = int(points.size()) - 1;
+    for (int i = 0; i <= last; ++i) {
+        const QPointF c = points[i].position;
+        const qreal offset = 0.5 * tessellator.halfWidthAt(points[i]);
+        QPointF across;
+        if (i == 0) {
+            across = normalOf(directions.constFirst());
+            probes.append(c - StrokeTessellator::capDirection(points, StrokeTessellator::CapEnd::Start,
+                                                              2.0 * offset)
+                                  * offset);
+        } else if (i == last) {
+            across = normalOf(directions.constLast());
+            probes.append(c + StrokeTessellator::capDirection(points, StrokeTessellator::CapEnd::End,
+                                                              2.0 * offset)
+                                  * offset);
+        } else {
+            across = unit(normalOf(directions[i - 1]) + normalOf(directions[i]));
+            if (across.isNull())
+                across = normalOf(directions[i]);
+        }
+        probes.append(c + across * offset);
+        probes.append(c - across * offset);
+        if (i < last) {
+            const QPointF middle = (c + points[i + 1].position) / 2.0;
+            const qreal halfWidth = std::min(tessellator.halfWidthAt(points[i]),
+                                             tessellator.halfWidthAt(points[i + 1]));
+            probes.append(middle + normalOf(directions[i]) * (0.5 * halfWidth));
+            probes.append(middle - normalOf(directions[i]) * (0.5 * halfWidth));
+        }
+    }
+    return probes;
 }
 
 qreal distanceToPolyline(const QPointF &p, const QList<InkPoint> &points)
@@ -135,6 +210,101 @@ class TestStrokeTessellator : public QObject
     Q_OBJECT
 
 private:
+    // Растр контура экспорта при 4 px на точку, заливка по ненулевому обходу,
+    // как в NoteExporter. Залит каждый пиксель, центр которого ближе hw - 0.5 px
+    // к сегменту осевой (hw - меньшая из полуширин его концов), и ни один
+    // дальше hw + 0.5 px (большая из полуширин). Штрих - то, что даёт
+    // WetStroke на этих отсчётах.
+    void checkOutlineFill(const QList<InkPoint> &input, qreal width, qreal zoom)
+    {
+        Stroke prototype;
+        prototype.width = width;
+        prototype.style = StrokeStyle::Tapered;
+        WetStroke wet;
+        wet.begin(0, prototype, zoom);
+        for (const InkPoint &point : input)
+            wet.addPoint(point);
+        const Stroke stroke = wet.finish();
+        QVERIFY(stroke.points.size() > 10);
+
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        QPainterPath outline;
+        outline.addPolygon(tessellator.outline(stroke.points));
+        outline.setFillRule(Qt::WindingFill);
+
+        constexpr qreal pxPerUnit = 4.0;
+        const QRectF bounds = outline.boundingRect().adjusted(-2.0, -2.0, 2.0, 2.0);
+        QImage image(int(std::ceil(bounds.width() * pxPerUnit)),
+                     int(std::ceil(bounds.height() * pxPerUnit)), QImage::Format_Grayscale8);
+        image.fill(255);
+        {
+            QPainter painter(&image);
+            painter.setRenderHint(QPainter::Antialiasing, false);
+            painter.scale(pxPerUnit, pxPerUnit);
+            painter.translate(-bounds.topLeft());
+            painter.fillPath(outline, Qt::black);
+        }
+
+        const QList<InkPoint> &points = stroke.points;
+        const qreal margin = 0.5 / pxPerUnit;
+        const int size = image.width() * image.height();
+        QList<bool> required(size, false);
+        QList<bool> allowed(size, false);
+        QList<qreal> depth(size, 0.0);
+        for (int i = 0; i + 1 < points.size(); ++i) {
+            const QPointF a = points[i].position;
+            const QPointF b = points[i + 1].position;
+            const qreal hwA = tessellator.halfWidthAt(points[i]);
+            const qreal hwB = tessellator.halfWidthAt(points[i + 1]);
+            const qreal inner = std::min(hwA, hwB) - margin;
+            const qreal outer = std::max(hwA, hwB) + margin;
+            const QRectF box = QRectF(a, b).normalized().adjusted(-outer, -outer, outer, outer);
+            const int x0 = std::max(0, int((box.left() - bounds.left()) * pxPerUnit));
+            const int x1 = std::min(image.width() - 1, int((box.right() - bounds.left()) * pxPerUnit) + 1);
+            const int y0 = std::max(0, int((box.top() - bounds.top()) * pxPerUnit));
+            const int y1 = std::min(image.height() - 1, int((box.bottom() - bounds.top()) * pxPerUnit) + 1);
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x) {
+                    const QPointF p = bounds.topLeft() + QPointF(x + 0.5, y + 0.5) / pxPerUnit;
+                    const qreal distance = distanceToSegment(p, a, b);
+                    const int k = y * image.width() + x;
+                    if (distance <= outer)
+                        allowed[k] = true;
+                    if (distance <= inner) {
+                        required[k] = true;
+                        depth[k] = std::max(depth[k], inner - distance);
+                    }
+                }
+            }
+        }
+
+        int holes = 0;
+        int spills = 0;
+        qreal deepest = 0.0;
+        for (int y = 0; y < image.height(); ++y) {
+            const uchar *row = image.constScanLine(y);
+            for (int x = 0; x < image.width(); ++x) {
+                const int k = y * image.width() + x;
+                const bool filled = row[x] == 0;
+                if (required[k] && !filled) {
+                    ++holes;
+                    deepest = std::max(deepest, depth[k] * pxPerUnit);
+                }
+                if (filled && !allowed[k])
+                    ++spills;
+            }
+        }
+        QVERIFY2(holes == 0,
+                 qPrintable(QStringLiteral("незалитых пикселей внутри штриха: %1, до %2 px "
+                                           "глубже допуска")
+                                .arg(holes)
+                                .arg(deepest)));
+        QVERIFY2(spills == 0,
+                 qPrintable(QStringLiteral("залитых пикселей за кромкой: %1").arg(spills)));
+    }
+
     // Общая проверка «без артефактов» для любой траектории.
     void checkNoArtifacts(const QList<InkPoint> &points, const StrokeTessellator &tessellator,
                           const char *label)
@@ -158,12 +328,16 @@ private:
                                     .arg(maxHalfWidth)));
         }
 
-        // И вся средняя линия покрыта полосой: значит, на стыках нет дыр.
-        for (int i = 0; i < points.size(); ++i) {
-            QVERIFY2(stripCovers(strip, points[i].position),
-                     qPrintable(QStringLiteral("%1: точка %2 средней линии не покрыта")
+        // И штрих вокруг всей средней линии покрыт полосой - по обе стороны
+        // оси, у стыков и за концами: значит, на стыках нет дыр, а веера на
+        // месте и не вывернуты.
+        const QList<QPointF> probes = coverageProbes(points, tessellator);
+        for (int i = 0; i < probes.size(); ++i) {
+            QVERIFY2(stripCovers(strip, probes[i]),
+                     qPrintable(QStringLiteral("%1: точка (%2, %3) у средней линии не покрыта")
                                     .arg(QString::fromLatin1(label))
-                                    .arg(i)));
+                                    .arg(probes[i].x())
+                                    .arg(probes[i].y())));
         }
     }
 
@@ -488,6 +662,68 @@ private slots:
         // Ни одна вершина контура не дальше полуширины от осевой.
         for (const QPointF &p : outline)
             QVERIFY(distanceToPolyline(p, points) <= r + 1e-4);
+    }
+
+    // Экспорт заливает outline() по ненулевому обходу (NoteExporter). На
+    // острых поворотах настоящего штриха - выход StrokeSampler, отсчёты
+    // гуще полуширины - внутренняя сторона контура заходит сама за себя, и
+    // петля не должна выйти обратного обхода: иначе в PDF внутри острия
+    // остаётся незалитая щель. Штрих снят на зуме 1 и 4: на большом зуме
+    // отсчёты гуще.
+    void outlineFillsSharpTurnsOfSampledStrokes_data()
+    {
+        QTest::addColumn<QList<QPointF>>("path");
+        QTest::addColumn<qreal>("dwell");
+        QTest::addColumn<qreal>("width");
+        QTest::addColumn<qreal>("zoom");
+        const QList<std::pair<const char *, QList<QPointF>>> paths = {
+            {"зигзаг", reference::sharpZigzag()}, {"N", reference::cornerN()}};
+        for (const auto &[name, path] : paths) {
+            for (const qreal dwell : {0.0, 0.03}) {
+                for (const qreal width : {2.4, 4.5}) {
+                    for (const qreal zoom : {1.0, 4.0}) {
+                        QTest::addRow("%s, стоянка %g с, перо %g, зум %g", name, dwell, width, zoom)
+                            << path << dwell << width << zoom;
+                    }
+                }
+            }
+        }
+    }
+
+    void outlineFillsSharpTurnsOfSampledStrokes()
+    {
+        QFETCH(QList<QPointF>, path);
+        QFETCH(qreal, dwell);
+        QFETCH(qreal, width);
+        QFETCH(qreal, zoom);
+        checkOutlineFill(reference::sampledAtSpeed(path, 600.0, 240.0, dwell), width, zoom);
+    }
+
+    // На гладких штрихах контур - тот же штрих, что и полоса: залито всё
+    // ближе hw - 0.5 px к осевой и ничего дальше hw + 0.5 px.
+    void outlineMatchesSmoothSampledStrokes_data()
+    {
+        QTest::addColumn<QList<QPointF>>("path");
+        QTest::addColumn<qreal>("width");
+        QTest::addColumn<qreal>("zoom");
+        const QList<std::pair<const char *, QList<QPointF>>> paths = {
+            {"петля", reference::loop()},
+            {"буква e", reference::letterE()},
+            {"окружность", reference::circle(20.0, 1, QPointF(60, 60), 360)}};
+        for (const auto &[name, path] : paths) {
+            for (const qreal width : {2.4, 4.5}) {
+                for (const qreal zoom : {1.0, 4.0})
+                    QTest::addRow("%s, перо %g, зум %g", name, width, zoom) << path << width << zoom;
+            }
+        }
+    }
+
+    void outlineMatchesSmoothSampledStrokes()
+    {
+        QFETCH(QList<QPointF>, path);
+        QFETCH(qreal, width);
+        QFETCH(qreal, zoom);
+        checkOutlineFill(reference::sampledAtSpeed(path, 300.0, 240.0), width, zoom);
     }
 
     // Сценарий «Точка над буквой» (D5) в его геометрической части: касание
