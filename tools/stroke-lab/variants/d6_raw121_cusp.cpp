@@ -657,7 +657,7 @@ public:
             return g;
         g.kind = lab::Geometry::Kind::TriangleStrip;
         for (const auto &v : strip)
-            g.vertices.emplace_back(v.x, v.y);
+            g.vertices.push_back(v.at(v.hw));
         return g;
     }
 

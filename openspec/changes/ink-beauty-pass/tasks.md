@@ -7438,7 +7438,7 @@ passed`, `tst_wetstroke` - 23, `tst_strokesampler` - 37, `tst_inkcoverage` - 8. 
   стенда, которые берут `StrokeTessellator::Vertex` (`d6_raw121_cusp.cpp`, если шаг 2 его оставил)
 - Create: `tools/stroke-lab/variants/app_ink.cpp`
 
-- [ ] 11.1 **Падающие тесты геометрии в `tests/tst_stroketessellator.cpp`**
+- [x] 11.1 **Падающие тесты геометрии в `tests/tst_stroketessellator.cpp`**
 
 Файл после шага 2 (шаг 2, 6.1-6.3, 7.1). В анонимном пространстве имён функцию `toPoint`
 заменить: имя остаётся, теперь это вершина «в покое», - и добавить `nearPoint`:
@@ -7738,7 +7738,7 @@ QList<qreal> sideWidths(const QVector<Vertex> &strip)
     }
 ```
 
-- [ ] 11.2 **Прогон - ожидаемый провал сборки**
+- [x] 11.2 **Прогон - ожидаемый провал сборки**
 
 ```
 cmake --build build -j$(nproc) --target tst_stroketessellator
@@ -7747,7 +7747,7 @@ cmake --build build -j$(nproc) --target tst_stroketessellator
 Ожидаемо: ошибка компиляции теста - у `StrokeTessellator` нет `kStartCapVertices`,
 `kCapFanSteps`, у вершины нет `at`, `isCenter`, `cx`; нет `AxisVertex`.
 
-- [ ] 11.3 **`src/ink/stroketessellator.h` - заменить целиком**
+- [x] 11.3 **`src/ink/stroketessellator.h` - заменить целиком**
 
 Заголовок после шага 2 (`kCapPairs`, `emitDot`) заменяется полностью. `setStyle`,
 `capDirection` и публичный `isDot` - объявления шагов 1-2 без изменений; `kCapPairs` и
@@ -7934,7 +7934,7 @@ private:
 };
 ```
 
-- [ ] 11.4 **`src/ink/stroketessellator.cpp` - заменить целиком**
+- [x] 11.4 **`src/ink/stroketessellator.cpp` - заменить целиком**
 
 `setStyle`, `halfWidthAt` (шаг 1), `capDirection` и `isDot` (шаг 2) перенесены
 дословно; `emitCap`, `emitJoint`, `tessellate`, `outline`, `isDegenerate` новые;
@@ -8363,7 +8363,7 @@ bool StrokeTessellator::isDegenerate(const QVector<Vertex> &strip)
 }
 ```
 
-- [ ] 11.5 **Остальные тесты шага 2 в `tst_stroketessellator` - под ось**
+- [x] 11.5 **Остальные тесты шага 2 в `tst_stroketessellator` - под ось**
 
 Правки по месту (файл - после шага 2):
 
@@ -8422,7 +8422,7 @@ bool StrokeTessellator::isDegenerate(const QVector<Vertex> &strip)
 `widthFollowsPressureSmoothly` и `missingPressureGivesConstantWidth` правок не требуют:
 `sideWidths` находит те же поперечные пары.
 
-- [ ] 11.6 **Прогон `tst_stroketessellator`**
+- [x] 11.6 **Прогон `tst_stroketessellator`**
 
 ```
 cmake --build build -j$(nproc) --target tst_stroketessellator
@@ -8432,7 +8432,7 @@ cmake --build build -j$(nproc) --target tst_stroketessellator
 (`uploadStrip` читает `.x/.y`, мост - 11.9); `wetstroke.cpp` собирается - у `emitJoint`
 радиус по умолчанию. Прогон теста - в 11.10.
 
-- [ ] 11.7 **`src/ink/wetstroke.cpp`: радиус кривизны в стыках мокрой полосы**
+- [x] 11.7 **`src/ink/wetstroke.cpp`: радиус кривизны в стыках мокрой полосы**
 
 В `rebuildTail()` (после шага 2) цикл окончательных стыков
 `for (int i = m_jointedPoints; i + 1 < points.size(); ++i) { m_tessellator.emitJoint(...); }`
@@ -8472,7 +8472,7 @@ cmake --build build -j$(nproc) --target tst_stroketessellator
 
 Вызовы `emitCap`, `startCapIsSettled`, `endCapWindow` шага 2 не трогать.
 
-- [ ] 11.8 **`tests/tst_wetstroke.cpp`: вершины целиком, торцы-веера, тугая петля**
+- [x] 11.8 **`tests/tst_wetstroke.cpp`: вершины целиком, торцы-веера, тугая петля**
 
 Файл после шага 2 (шаг 2, 6.4, 7.3). В анонимном пространстве имён блок от
 `// Вершин в одном торце: K + 1 пар (design.md, D4).` до конца `endCapCenter` заменить:
@@ -8620,7 +8620,7 @@ bool sameVertex(const WetStroke::Vertex &a, const WetStroke::Vertex &b, float to
     }
 ```
 
-- [ ] 11.9a **Тест шага 1 `dryGeometryFollowsStrokeStyle` - на ось**
+- [x] 11.9a **Тест шага 1 `dryGeometryFollowsStrokeStyle` - на ось**
 
 У вершины полосы больше нет полей `x` и `y`. В `tests/tst_canvasink.cpp`, в
 `dryGeometryFollowsStrokeStyle`, цикл по вершинам заменить на положение кромки
@@ -8650,7 +8650,7 @@ bool sameVertex(const WetStroke::Vertex &a, const WetStroke::Vertex &b, float to
 
 Проверяется прогоном в 11.10 вместе с остальными тестами холста.
 
-- [ ] 11.9 **Мост в `DocumentCanvas` и тест торца в `tst_canvasink`**
+- [x] 11.9 **Мост в `DocumentCanvas` и тест торца в `tst_canvasink`**
 
 В `src/canvas/documentcanvas.cpp` тело `uploadStrip` заменить целиком (временно, до
 группы 12):
@@ -8680,7 +8680,7 @@ void uploadStrip(QSGGeometryNode *node, const StrokeTessellator::Vertex *source,
         const QPointF capCenter = strip.constLast().center();
 ```
 
-- [ ] 11.10 **Прогон групп тестов чернил**
+- [x] 11.10 **Прогон групп тестов чернил**
 
 ```
 cmake --build build -j$(nproc) && \
@@ -8692,7 +8692,7 @@ passed`, `tst_wetstroke` - `Totals: 23 passed` (вместе с тестами �
 `tst_strokesampler` - `Totals: 37 passed`. `tst_canvasink`, `tst_export`, `tst_pagescenegraph` на копии не собирались
 (нет libqpdf).
 
-- [ ] 11.11 **Падающий тест зеркала покрытия: `tests/tst_inkcoverage.cpp`**
+- [x] 11.11 **Падающий тест зеркала покрытия: `tests/tst_inkcoverage.cpp`**
 
 ```cpp
 // ink-beauty-pass, D7: покрытие кромки по формулам материала чернил на CPU -
@@ -8805,7 +8805,7 @@ uq_add_test(tst_inkcoverage tst_inkcoverage.cpp)
 Прогон: `cmake --build build --target tst_inkcoverage` - ожидаемо ошибка: нет
 `ink/inkcoverage.h`.
 
-- [ ] 11.12 **Создать `src/ink/inkcoverage.h`**
+- [x] 11.12 **Создать `src/ink/inkcoverage.h`**
 
 ```cpp
 #pragma once
@@ -8872,7 +8872,7 @@ ctest --test-dir build -R tst_inkcoverage --output-on-failure
 
 Ожидаемо: `100% tests passed` (на копии - `Totals: 8 passed`: шесть слотов и init/cleanup).
 
-- [ ] 11.13 **Стенд: собираться с новой вершиной и показывать приложение (`app-ink`)**
+- [x] 11.13 **Стенд: собираться с новой вершиной и показывать приложение (`app-ink`)**
 
 Стенд компилирует `src/ink/*.cpp` приложения, поэтому `baseline` и `AppPipeline`
 перестают собираться. Правка - полоса в покое под эмуляцией MSAA, как раньше:
@@ -8962,7 +8962,7 @@ STROKE_LAB_VARIANT(AppInk, "app-ink",
                    "по формулам InkMaterial (src/ink/inkcoverage.h), over, без MSAA");
 ```
 
-- [ ] 11.14 **Сверить приложение с прототипом на стенде**
+- [x] 11.14 **Сверить приложение с прототипом на стенде**
 
 ```
 cmake --build build -j$(nproc) --target stroke-lab
@@ -8998,7 +8998,7 @@ EOF
 (`capDirection`), у прототипа - последний сегмент. Если отличий больше 2% закрашенных пикселей, вернуться к 11.4: стык
 или предел в приложении разошёлся с `aa-fringe-rho`.
 
-- [ ] 11.15 **Полный прогон и коммит**
+- [x] 11.15 **Полный прогон и коммит**
 
 ```
 ctest --test-dir build --output-on-failure

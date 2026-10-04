@@ -73,7 +73,7 @@ qreal cross(const QPointF &a, const QPointF &b) { return a.x() * b.y() - a.y() *
 // (hw + e)·cos(θ/2). Расстояние до прямой аффинно по позиции, поэтому если у
 // всех вершин треугольника d - точное расстояние до одной и той же прямой,
 // интерполяция varying точна.
-struct AxisVertex
+struct FringeAxisVertex
 {
     QPointF c;
     QPointF n;
@@ -97,9 +97,9 @@ public:
     {
     }
 
-    std::vector<AxisVertex> tessellate(const QList<InkPoint> &points) const
+    std::vector<FringeAxisVertex> tessellate(const QList<InkPoint> &points) const
     {
-        std::vector<AxisVertex> out;
+        std::vector<FringeAxisVertex> out;
         if (points.size() < 2)
             return out;
         QList<QPointF> dirs;
@@ -126,14 +126,14 @@ public:
 private:
     static int capSteps() { return qMax(4, int(std::ceil(M_PI / kRoundJoinStep))); }
 
-    void pair(std::vector<AxisVertex> &out, const QPointF &c, const QPointF &nl, const QPointF &nr,
+    void pair(std::vector<FringeAxisVertex> &out, const QPointF &c, const QPointF &nl, const QPointF &nr,
               qreal hw) const
     {
         out.push_back({c, nl, hw, +1});
         out.push_back({c, nr, hw, -1});
     }
 
-    void startCap(std::vector<AxisVertex> &out, const QPointF &c, qreal hw, const QPointF &dir) const
+    void startCap(std::vector<FringeAxisVertex> &out, const QPointF &c, qreal hw, const QPointF &dir) const
     {
         // Веер от правой нормали через «назад» к левой: v(φ) = −n cosφ − dir sinφ.
         const QPointF n = normalOf(dir);
@@ -149,7 +149,7 @@ private:
         out.push_back({c, -n, hw, -1});
     }
 
-    void endCap(std::vector<AxisVertex> &out, const QPointF &c, qreal hw, const QPointF &dir) const
+    void endCap(std::vector<FringeAxisVertex> &out, const QPointF &c, qreal hw, const QPointF &dir) const
     {
         const QPointF n = normalOf(dir);
         pair(out, c, n, -n, hw);
@@ -162,7 +162,7 @@ private:
         }
     }
 
-    void joint(std::vector<AxisVertex> &out, const QPointF &c, qreal hw, const QPointF &in,
+    void joint(std::vector<FringeAxisVertex> &out, const QPointF &c, qreal hw, const QPointF &in,
                const QPointF &outDir, qreal span) const
     {
         const qreal turn = std::atan2(cross(in, outDir), QPointF::dotProduct(in, outDir));
@@ -179,8 +179,8 @@ private:
             QPointF b = normalized(normalOf(in) + normalOf(outDir));
             if (b.isNull())
                 b = normalOf(outDir);
-            AxisVertex l{c, b, hw, +1, cosHalf};
-            AxisVertex r{c, -b, hw, -1, cosHalf};
+            FringeAxisVertex l{c, b, hw, +1, cosHalf};
+            FringeAxisVertex r{c, -b, hw, -1, cosHalf};
             // Внутренняя сторона - та, куда поворачивает штрих.
             (turn > 0.0 ? l : r).radius = radius;
             out.push_back(l);
@@ -206,12 +206,12 @@ private:
                            startNormal.x() * si + startNormal.y() * co);
         };
         const int innerSide = left ? +1 : -1;
-        AxisVertex I{c, innerN, hw, innerSide, cosHalf};
+        FringeAxisVertex I{c, innerN, hw, innerSide, cosHalf};
         if (!degenerate)
             I.radius = radius;
-        const auto O = [&](int s) { return AxisVertex{c, outer(s), hw, -innerSide, 1.0}; };
+        const auto O = [&](int s) { return FringeAxisVertex{c, outer(s), hw, -innerSide, 1.0}; };
         if (!m_exact) {
-            // Как StrokeTessellator: веер из внутренней точки. Линейная
+            // Как прежний StrokeTessellator: веер из внутренней точки. Линейная
             // интерполяция d между внутренней и внешней вершиной, которые не
             // лежат напротив друг друга, сдвигает ноль d с оси - на остром
             // углу вылезает «шип».
@@ -229,7 +229,7 @@ private:
         // Точный стык: треугольник (I, O_0, C) - всё точно относительно
         // прямой входящего сегмента; веер (O_k, C, O_k+1) вокруг центра стыка
         // C (d = 0, радиально); (C, O_K, I) - относительно исходящего.
-        const AxisVertex C{c, QPointF(), hw, 0, 1.0};
+        const FringeAxisVertex C{c, QPointF(), hw, 0, 1.0};
         if (left) {
             out.push_back(I);
             out.push_back(O(0));
@@ -273,7 +273,7 @@ public:
     {
     }
 
-    std::vector<AxisVertex> axisStrip() const
+    std::vector<FringeAxisVertex> axisStrip() const
     {
         AxisTessellator t([this](const InkPoint &p) { return halfWidthAt(p); }, m_exactJoins,
                           m_radiusLimit, radiusFactor());
@@ -285,19 +285,19 @@ public:
     Geometry geometry() const override
     {
         Geometry g;
-        const std::vector<AxisVertex> strip = axisStrip();
+        const std::vector<FringeAxisVertex> strip = axisStrip();
         if (strip.size() < 4)
             return g;
         g.kind = Geometry::Kind::TriangleStrip;
         g.vertices.reserve(strip.size());
-        for (const AxisVertex &v : strip)
+        for (const FringeAxisVertex &v : strip)
             g.vertices.push_back(v.c + v.n * v.hw);
         return g;
     }
 
     bool rasterize(const Geometry &, const RasterTarget &target) const override
     {
-        const std::vector<AxisVertex> strip = axisStrip();
+        const std::vector<FringeAxisVertex> strip = axisStrip();
         if (strip.size() < 4 || !target.image)
             return false;
         const QTransform &T = target.pageToPixel;
@@ -305,7 +305,7 @@ public:
         // Атрибуты: d (знаковое расстояние), hw, alpha.
         std::vector<AttrVertex<3>> v;
         v.reserve(strip.size());
-        for (const AxisVertex &a : strip) {
+        for (const FringeAxisVertex &a : strip) {
             const double hwPx = a.hw * s;
             double hwDraw = std::max(hwPx, m_minHw);
             double alpha = 1.0;
@@ -417,7 +417,7 @@ bool lab::fringeGpuStrip(const Variant &variant, std::vector<FringeGpuVertex> &o
     if (!fringe)
         return false;
     out.clear();
-    for (const AxisVertex &a : fringe->axisStrip()) {
+    for (const FringeAxisVertex &a : fringe->axisStrip()) {
         const bool center = a.side == 0 || a.n.isNull();
         const float sign = a.side == -1 ? -1.0f : 1.0f;
         out.push_back({float(a.c.x()), float(a.c.y()), center ? 0.0f : float(a.n.x()),
@@ -437,7 +437,7 @@ STROKE_LAB_VARIANT(FringeMax, "aa-fringe-max",
 STROKE_LAB_VARIANT(FringeNoFloor, "aa-fringe-nofloor",
                    "как aa-fringe, без нижнего порога толщины 0.3 px");
 STROKE_LAB_VARIANT(FringeNaiveJoin, "aa-fringe-naive",
-                   "как aa-fringe, но стык как в StrokeTessellator (веер из внутренней точки, "
+                   "как aa-fringe, но стык как в прежнем StrokeTessellator (веер из внутренней точки, "
                    "d = ±(hw+e) у всех вершин) - даёт шипы на острых углах");
 STROKE_LAB_VARIANT(FringeHairline, "aa-fringe-hairline",
                    "как aa-fringe, но тонкие линии - hairline 1 px с alpha = max(w, 0.3) "

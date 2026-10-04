@@ -73,7 +73,7 @@ public:
         g.kind = Geometry::Kind::TriangleStrip;
         g.vertices.reserve(strip.size());
         for (const auto &v : strip)
-            g.vertices.emplace_back(v.x, v.y);
+            g.vertices.push_back(v.at(v.hw));
         return g;
     }
 
@@ -82,7 +82,7 @@ public:
         Geometry g;
         g.kind = Geometry::Kind::TriangleStrip;
         for (const auto &v : m_wet.strip())
-            g.vertices.emplace_back(v.x, v.y);
+            g.vertices.push_back(v.at(v.hw));
         return g;
     }
 

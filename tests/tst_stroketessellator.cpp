@@ -12,9 +12,16 @@ namespace {
 
 using Vertex = StrokeTessellator::Vertex;
 
+// Вершина полосы «в покое» - без выноса бахромы, на полуширине. Это та же
+// фигура, что раньше давала плоская полоса; у центра веера - сам центр.
 QPointF toPoint(const Vertex &v)
 {
-    return QPointF(v.x, v.y);
+    return v.at(v.hw);
+}
+
+bool nearPoint(const Vertex &v, const QPointF &p, qreal tolerance = 1e-3)
+{
+    return std::hypot(v.cx - p.x(), v.cy - p.y()) < tolerance;
 }
 
 bool insideTriangle(const QPointF &p, const QPointF &a, const QPointF &b, const QPointF &c)
@@ -59,25 +66,43 @@ qreal distanceToPolyline(const QPointF &p, const QList<InkPoint> &points)
 
 // --- ink-beauty-pass, D4 и D5 ------------------------------------------------
 
-// Вершин в одном торце: K + 1 пар.
-constexpr int kCapVertices = 2 * (StrokeTessellator::kCapPairs + 1);
+// Вершин в торцах: полувеер из K + 1 центров и K + 1 вершин дуги, у начального
+// торца ещё правая вершина боковой пары, у конечного - вся боковая пара.
+constexpr int kStartCapVertices = StrokeTessellator::kStartCapVertices;
+constexpr int kEndCapVertices = StrokeTessellator::kEndCapVertices;
 
-// Середина боковой пары торца - центр его дуги. У начального торца боковая
-// пара последняя, у конечного - первая.
+// Центр торца - центр любой его вершины: первая вершина полосы - центр
+// начального полувеера, последняя - вершина дуги конечного.
 QPointF capCenter(const QVector<Vertex> &strip, StrokeTessellator::CapEnd end)
 {
-    const int i = end == StrokeTessellator::CapEnd::Start ? kCapVertices - 2
-                                                          : int(strip.size()) - kCapVertices;
-    return (toPoint(strip[i]) + toPoint(strip[i + 1])) / 2.0;
+    return end == StrokeTessellator::CapEnd::Start ? strip.constFirst().center()
+                                                   : strip.constLast().center();
 }
 
-// Полные толщины пар от боковой пары начального торца до боковой пары
-// конечного. У прямого штриха это ровно по одной паре на точку.
+// Кончик торца - вершина дуги на оси штриха (φ = π/2), в покое.
+QPointF capTip(const QVector<Vertex> &strip, StrokeTessellator::CapEnd end)
+{
+    const int half = StrokeTessellator::kCapFanSteps / 2;
+    return end == StrokeTessellator::CapEnd::Start
+        ? toPoint(strip[2 * half + 1])
+        : toPoint(strip[int(strip.size()) - 1 - 2 * (StrokeTessellator::kCapFanSteps - half)]);
+}
+
+// Полные толщины поперечных пар: боковая пара начального торца, пары на
+// биссектрисах, боковая пара конечного. У прямого штриха это ровно по одной
+// паре на точку.
 QList<qreal> sideWidths(const QVector<Vertex> &strip)
 {
     QList<qreal> widths;
-    for (int i = kCapVertices - 2; i <= int(strip.size()) - kCapVertices; i += 2)
-        widths.append(QLineF(toPoint(strip[i]), toPoint(strip[i + 1])).length());
+    for (int i = 0; i + 1 < strip.size(); ++i) {
+        const Vertex &a = strip[i];
+        const Vertex &b = strip[i + 1];
+        if (a.isCenter() || b.isCenter() || a.s <= 0.0f || b.s != -a.s || a.cx != b.cx
+            || a.cy != b.cy)
+            continue;
+        widths.append(QLineF(toPoint(a), toPoint(b)).length());
+        ++i;
+    }
     return widths;
 }
 
@@ -117,7 +142,6 @@ private:
         const QVector<Vertex> strip = tessellator.tessellate(points);
 
         QVERIFY2(!StrokeTessellator::isDegenerate(strip), label);
-        QVERIFY2(strip.size() % 2 == 0, label);
 
         qreal maxHalfWidth = 0.0;
         for (const InkPoint &point : points)
@@ -156,7 +180,7 @@ private slots:
 
         const QVector<Vertex> strip = tessellator.tessellate(points);
         // По паре на каждую внутреннюю точку и по полудиску на каждом конце.
-        QCOMPARE(strip.size(), (points.size() - 2) * 2 + 2 * kCapVertices);
+        QCOMPARE(strip.size(), (points.size() - 2) * 2 + kStartCapVertices + kEndCapVertices);
 
         const QList<qreal> widths = sideWidths(strip);
         QCOMPARE(widths.size(), points.size());
@@ -248,7 +272,11 @@ private slots:
         for (int i = 0; i < 10; ++i)
             points.append({QPointF(i * 5.0, 50.0), 0.0, i / 200.0});
         const QVector<Vertex> strip = tessellator.tessellate(points);
-        QCOMPARE(strip.size(), (points.size() - 2) * 2 + 2 * kCapVertices);
+        QCOMPARE(strip.size(), (points.size() - 2) * 2 + kStartCapVertices + kEndCapVertices);
+        // Полуширина у каждой вершины - та же, что в поперечных парах.
+        for (const Vertex &v : strip)
+            QVERIFY2(qAbs(v.hw - 4.0f * 0.08f / 2.0f) < 1e-5f,
+                     qPrintable(QStringLiteral("hw %1").arg(v.hw)));
         const QList<qreal> widths = sideWidths(strip);
         QCOMPARE(widths.size(), points.size());
         for (int i = 0; i < widths.size(); ++i) {
@@ -317,8 +345,9 @@ private slots:
                                        {QPointF(10, 10), 1.0, 0.02}};
 
         // Два торца и одна пара на стыке, без дуги.
-        QCOMPARE(tessellator.tessellate(gentle).size(), 2 * kCapVertices + 2);
-        QVERIFY2(tessellator.tessellate(sharp).size() > 2 * kCapVertices + 2, "стык не скруглён");
+        QCOMPARE(tessellator.tessellate(gentle).size(), kStartCapVertices + kEndCapVertices + 2);
+        QVERIFY2(tessellator.tessellate(sharp).size() > kStartCapVertices + kEndCapVertices + 2,
+                 "стык не скруглён");
     }
 
     // --- ink-beauty-pass, D4: круглые торцы ---------------------------------
@@ -342,16 +371,20 @@ private slots:
         const qreal r1 = tessellator.halfWidthAt(points.constLast());
 
         const QVector<Vertex> strip = tessellator.tessellate(points);
-        QVERIFY(strip.size() >= 2 * kCapVertices);
-        QCOMPARE(strip.size() % 2, 0);
+        QVERIFY(strip.size() >= kStartCapVertices + kEndCapVertices);
 
-        for (int i = 0; i < kCapVertices; ++i) {
+        // Центры вееров стоят в самой точке, остальные вершины торца - на дуге.
+        for (int i = 0; i < kStartCapVertices; ++i) {
+            if (strip[i].isCenter())
+                continue;
             const qreal d = QLineF(toPoint(strip[i]), first).length();
             QVERIFY2(qAbs(d - r0) <= 0.05 * r0,
                      qPrintable(QStringLiteral("начальный торец: вершина %1 в %2 от центра, "
                                                "радиус %3").arg(i).arg(d).arg(r0)));
         }
-        for (int i = int(strip.size()) - kCapVertices; i < strip.size(); ++i) {
+        for (int i = int(strip.size()) - kEndCapVertices; i < strip.size(); ++i) {
+            if (strip[i].isCenter())
+                continue;
             const qreal d = QLineF(toPoint(strip[i]), last).length();
             QVERIFY2(qAbs(d - r1) <= 0.05 * r1,
                      qPrintable(QStringLiteral("конечный торец: вершина %1 в %2 от центра, "
@@ -359,8 +392,8 @@ private slots:
         }
 
         // Кончики торцов - на оси, на полуширину за концами осевой.
-        QVERIFY(QLineF(toPoint(strip.constFirst()), first - QPointF(r0, 0.0)).length() < 1e-4);
-        QVERIFY(QLineF(toPoint(strip.constLast()), last + QPointF(r1, 0.0)).length() < 1e-4);
+        QVERIFY(QLineF(capTip(strip, StrokeTessellator::CapEnd::Start), first - QPointF(r0, 0.0)).length() < 1e-4);
+        QVERIFY(QLineF(capTip(strip, StrokeTessellator::CapEnd::End), last + QPointF(r1, 0.0)).length() < 1e-4);
         const QRectF bounds = boundsOf(strip);
         QVERIFY(qAbs(bounds.left() - (first.x() - r0)) < 1e-4);
         QVERIFY(qAbs(bounds.right() - (last.x() + r1)) < 1e-4);
@@ -399,7 +432,7 @@ private slots:
                                 .arg(chord.x()).arg(chord.y())));
 
         const QVector<Vertex> strip = tessellator.tessellate(points);
-        const QPointF tip = toPoint(strip.constLast());
+        const QPointF tip = capTip(strip, StrokeTessellator::CapEnd::End);
         QVERIFY2(QLineF(tip, end + chord * r).length() < 1e-4,
                  qPrintable(QStringLiteral("кончик торца в (%1, %2)").arg(tip.x()).arg(tip.y())));
 
@@ -444,7 +477,7 @@ private slots:
             points.append({QPointF(10.0 + i * 2.0, 30.0), 1.0, i / 200.0});
 
         const QPolygonF outline = tessellator.outline(points);
-        QVERIFY(outline.size() > 2 * kCapVertices);
+        QVERIFY(outline.size() > 2 * (StrokeTessellator::kCapFanSteps + 1));
         QCOMPARE(outline.constFirst(), outline.constLast());
 
         const qreal r = 2.0;
@@ -470,9 +503,11 @@ private slots:
 
         const QVector<Vertex> strip = tessellator.tessellate(points);
         QVERIFY(!StrokeTessellator::isDegenerate(strip));
-        QCOMPARE(strip.size(), 2 * kCapVertices);
-        for (const Vertex &vertex : strip)
-            QVERIFY(qAbs(QLineF(toPoint(vertex), center).length() - r) < 1e-4);
+        QCOMPARE(strip.size(), kStartCapVertices + kEndCapVertices);
+        for (const Vertex &vertex : strip) {
+            if (!vertex.isCenter())
+                QVERIFY(qAbs(QLineF(toPoint(vertex), center).length() - r) < 1e-4);
+        }
 
         const QRectF bounds = boundsOf(strip);
         QVERIFY(qAbs(bounds.width() - 2.0 * r) < 1e-4);
@@ -500,6 +535,8 @@ private slots:
         const QVector<Vertex> strip = tessellator.tessellate(tap);
         QVERIFY(!StrokeTessellator::isDegenerate(strip));
         for (const Vertex &vertex : strip) {
+            if (vertex.isCenter())
+                continue;
             const qreal d = distanceToSegment(toPoint(vertex), tap.constFirst().position,
                                               tap.constLast().position);
             QVERIFY2(qAbs(d - r) < 1e-4,
@@ -517,7 +554,167 @@ private slots:
                                       {QPointF(14.5, 10.0), 0.3, 0.02}};
         const QVector<Vertex> longer = tessellator.tessellate(line);
         const qreal r0 = tessellator.halfWidthAt(line.constFirst());
-        QVERIFY(QLineF(toPoint(longer.constFirst()), QPointF(10.0 - r0, 10.0)).length() < 1e-4);
+        QVERIFY(QLineF(capTip(longer, StrokeTessellator::CapEnd::Start), QPointF(10.0 - r0, 10.0)).length() < 1e-4);
+    }
+
+    // ink-beauty-pass, D7: центр каждой вершины - точка осевой; направление
+    // выноса нулевое (центр веера) или единичное; |s| не больше единицы.
+    void axisVerticesAreWellFormed()
+    {
+        StrokeTessellator tessellator;
+        tessellator.setWidth(5.0);
+        const QList<InkPoint> points = reference::fromPositions(reference::letterE());
+        const QVector<Vertex> strip = tessellator.tessellate(points);
+        QVERIFY(!StrokeTessellator::isDegenerate(strip));
+
+        for (int i = 0; i < strip.size(); ++i) {
+            const Vertex &v = strip[i];
+            bool onAxis = false;
+            for (const InkPoint &point : points) {
+                if (nearPoint(v, point.position)) {
+                    onAxis = true;
+                    break;
+                }
+            }
+            QVERIFY2(onAxis, qPrintable(QStringLiteral("центр вершины %1 не на осевой").arg(i)));
+            QVERIFY(v.hw > 0.0f);
+            QVERIFY(std::abs(v.s) <= 1.0f + 1e-6f);
+            if (v.isCenter()) {
+                QCOMPARE(v.s, 0.0f);
+                continue;
+            }
+            QVERIFY2(std::abs(v.directionLength() - 1.0) < 1e-5,
+                     qPrintable(QStringLiteral("|n| = %1 у вершины %2")
+                                    .arg(v.directionLength())
+                                    .arg(i)));
+        }
+    }
+
+    // D7, «Стыки точные»: у внутренней вершины d = ±(hw + e)·cos(θ/2) - её
+    // настоящее расстояние до прямых обоих сегментов при любом выносе.
+    void innerJointVertexCarriesExactDistance()
+    {
+        StrokeTessellator tessellator;
+        tessellator.setWidth(4.0);
+        // Вправо по y = 0, затем вниз по x = 20: поворот на +90°.
+        const QList<InkPoint> points = {{QPointF(0, 0), 1.0, 0.0},
+                                        {QPointF(20, 0), 1.0, 0.01},
+                                        {QPointF(20, 20), 1.0, 0.02}};
+        const QVector<Vertex> strip = tessellator.tessellate(points);
+        const qreal cosHalf = std::cos(M_PI / 4.0);
+
+        int inner = 0;
+        for (const Vertex &v : strip) {
+            if (v.isCenter() || std::abs(std::abs(v.s) - 1.0f) < 1e-6f)
+                continue;
+            ++inner;
+            QVERIFY(nearPoint(v, QPointF(20, 0)));
+            QVERIFY(std::abs(std::abs(v.s) - cosHalf) < 1e-5);
+            for (const qreal extension : {2.0, 3.0, 5.0}) {
+                const QPointF p = v.at(extension);
+                const qreal d = std::abs(v.s) * extension;
+                QVERIFY(std::abs(std::abs(p.y()) - d) < 1e-4);        // до прямой y = 0
+                QVERIFY(std::abs(std::abs(p.x() - 20.0) - d) < 1e-4); // до прямой x = 20
+            }
+        }
+        QVERIFY2(inner >= 1, "у стыка нет внутренней вершины");
+    }
+
+    // D7: внешняя дуга стыка - веер вокруг центра стыка (d = 0), а не из
+    // внутренней точки, как было.
+    void roundJoinFansAroundJointCenter()
+    {
+        StrokeTessellator tessellator;
+        tessellator.setWidth(4.0);
+        const QList<InkPoint> points = {{QPointF(0, 0), 1.0, 0.0},
+                                        {QPointF(20, 0), 1.0, 0.01},
+                                        {QPointF(20, 20), 1.0, 0.02}};
+        const QVector<Vertex> strip = tessellator.tessellate(points);
+
+        int centers = 0;
+        int arc = 0;
+        for (const Vertex &v : strip) {
+            if (!nearPoint(v, QPointF(20, 0)))
+                continue;
+            if (v.isCenter()) {
+                ++centers;
+                QCOMPARE(v.s, 0.0f);
+            } else if (std::abs(std::abs(v.s) - 1.0f) < 1e-6f) {
+                ++arc;
+                // Снаружи поворота: от нормали входящего (0, -1) к нормали
+                // исходящего (1, 0).
+                const QPointF n = v.direction();
+                QVERIFY(n.x() >= -1e-6 && n.y() <= 1e-6);
+                QVERIFY(std::abs(v.directionLength() - 1.0) < 1e-5);
+            }
+        }
+        QVERIFY2(centers >= 5, qPrintable(QStringLiteral("центров веера %1").arg(centers)));
+        QVERIFY2(arc >= 6, qPrintable(QStringLiteral("вершин дуги %1").arg(arc)));
+    }
+
+    // D7, «Торцы»: полувеер с центральной вершиной; дуга - позади начала и
+    // впереди конца штриха, полукругом от одной стороны до другой.
+    void capsAreHalfFansAroundEndPoints()
+    {
+        StrokeTessellator tessellator;
+        tessellator.setWidth(4.0);
+        tessellator.setMinWidthFactor(0.0);
+        QList<InkPoint> points;
+        for (int i = 0; i < 10; ++i)
+            points.append({QPointF(10 + i * 5.0, 50.0), 1.0, i / 200.0});
+        const QVector<Vertex> strip = tessellator.tessellate(points);
+
+        const QPointF first(10, 50);
+        const QPointF last(55, 50);
+        int startCenters = 0;
+        int endCenters = 0;
+        bool startBack = false;
+        bool endFront = false;
+        for (const Vertex &v : strip) {
+            if (nearPoint(v, first)) {
+                QVERIFY(std::abs(v.hw - 2.0f) < 1e-5f);
+                if (v.isCenter()) {
+                    ++startCenters;
+                    continue;
+                }
+                QVERIFY2(v.direction().x() <= 1e-6, "дуга начального торца впереди начала");
+                startBack = startBack || v.direction().x() < -0.999;
+            } else if (nearPoint(v, last)) {
+                QVERIFY(std::abs(v.hw - 2.0f) < 1e-5f);
+                if (v.isCenter()) {
+                    ++endCenters;
+                    continue;
+                }
+                QVERIFY2(v.direction().x() >= -1e-6, "дуга конечного торца позади конца");
+                endFront = endFront || v.direction().x() > 0.999;
+            }
+        }
+        QCOMPARE(startCenters, StrokeTessellator::kCapFanSteps + 1);
+        QCOMPARE(endCenters, StrokeTessellator::kCapFanSteps + 1);
+        QVERIFY2(startBack && endFront, "дуга торца не доходит до оси");
+    }
+
+    // Пологий стык - пара на биссектрисе с s = ±cos(θ/2).
+    void gentleJointPairCarriesHalfAngleCosine()
+    {
+        StrokeTessellator tessellator;
+        tessellator.setWidth(6.0);
+        const QList<InkPoint> points = {{QPointF(0, 0), 1.0, 0.0},
+                                        {QPointF(10, 0), 1.0, 0.01},
+                                        {QPointF(20, 1), 1.0, 0.02}};
+        const QVector<Vertex> strip = tessellator.tessellate(points);
+        const int startCap = 2 * (StrokeTessellator::kCapFanSteps + 1) + 1;
+        QCOMPARE(strip.size(), startCap + 2 + 2 + 2 * (StrokeTessellator::kCapFanSteps + 1));
+
+        const qreal cosHalf = std::cos(std::atan2(1.0, 10.0) / 2.0);
+        const Vertex &left = strip[startCap];
+        const Vertex &right = strip[startCap + 1];
+        QVERIFY(nearPoint(left, QPointF(10, 0)) && nearPoint(right, QPointF(10, 0)));
+        QVERIFY(std::abs(left.s - cosHalf) < 1e-5);
+        QVERIFY(std::abs(right.s + cosHalf) < 1e-5);
+        const QPointF l = left.direction();
+        const QPointF r = right.direction();
+        QVERIFY(std::abs(l.x() + r.x()) < 1e-5 && std::abs(l.y() + r.y()) < 1e-5);
     }
 
     void degenerateInputIsHandled()
@@ -532,8 +729,9 @@ private slots:
             stacked.append({QPointF(3, 3), 0.5, i / 200.0});
         const QVector<Vertex> strip = tessellator.tessellate(stacked);
         for (const Vertex &vertex : strip) {
-            QVERIFY(std::isfinite(vertex.x));
-            QVERIFY(std::isfinite(vertex.y));
+            QVERIFY(std::isfinite(vertex.cx) && std::isfinite(vertex.cy));
+            QVERIFY(std::isfinite(vertex.nx) && std::isfinite(vertex.ny));
+            QVERIFY(std::isfinite(vertex.hw) && std::isfinite(vertex.s));
         }
     }
 };

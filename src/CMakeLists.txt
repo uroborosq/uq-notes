@@ -17,6 +17,7 @@ qt_add_qml_module(uqnotes_core
         canvas/insertlistmodel.h
         ink/inkdocument.cpp
         ink/inkdocument.h
+        ink/inkcoverage.h
         ink/inktypes.h
         ink/oneeurofilter.cpp
         ink/oneeurofilter.h

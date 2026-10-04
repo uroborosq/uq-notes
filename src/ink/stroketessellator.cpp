@@ -3,6 +3,7 @@
 #include <QtGlobal>
 #include <QtMath>
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -34,14 +35,34 @@ QPointF normalized(const QPointF &v)
     return v / length;
 }
 
-StrokeTessellator::Vertex toVertex(const QPointF &p)
-{
-    return {float(p.x()), float(p.y())};
-}
-
 qreal cross(const QPointF &a, const QPointF &b)
 {
     return a.x() * b.y() - a.y() * b.x();
+}
+
+// Вершина кромки: направление выноса единичное, s - доля выноса в d.
+AxisVertex axisVertex(const QPointF &center, const QPointF &direction, qreal halfWidth, qreal side)
+{
+    return {float(center.x()), float(center.y()), float(direction.x()), float(direction.y()),
+            float(halfWidth), float(side)};
+}
+
+// Центр веера: d = 0, вынос нулевой.
+AxisVertex axisCenter(const QPointF &center, qreal halfWidth)
+{
+    return axisVertex(center, QPointF(), halfWidth, 0.0);
+}
+
+QPointF rotated(const QPointF &v, qreal angle)
+{
+    const qreal c = std::cos(angle);
+    const qreal s = std::sin(angle);
+    return QPointF(v.x() * c - v.y() * s, v.x() * s + v.y() * c);
+}
+
+qreal turnAngle(const QPointF &incoming, const QPointF &outgoing)
+{
+    return std::atan2(cross(incoming, outgoing), QPointF::dotProduct(incoming, outgoing));
 }
 
 } // namespace
@@ -86,20 +107,37 @@ qreal StrokeTessellator::halfWidthAt(const InkPoint &point) const
 void StrokeTessellator::emitCap(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
                                 const QPointF &direction, CapEnd end) const
 {
-    // Начальный торец идёт от кончика позади точки касания к боковой паре,
-    // конечный - от боковой пары к кончику за точкой отрыва: так торец
-    // стыкуется с полосой без разворота пар. Кончик - пара из двух совпадающих
-    // вершин, её треугольники нулевой площади и ничего не рисуют.
+    // Полувеер вокруг точки (design.md, D7): у плоской пары нет бахромы вдоль
+    // штриха, кромка торца осталась бы ступенчатой. Пары D4 заменены,
+    // круглый торец остался.
     const QPointF normal = normalOf(direction);
-    const qreal sign = end == CapEnd::Start ? -1.0 : 1.0;
-    for (int i = 0; i <= kCapPairs; ++i) {
-        const int k = end == CapEnd::Start ? i : kCapPairs - i;
-        const qreal angle = M_PI_2 * k / kCapPairs;
-        const QPointF base = position + direction * (sign * halfWidth * std::cos(angle));
-        const QPointF side = normal * (halfWidth * std::sin(angle));
-        // Порядок в паре тот же, что у стыка: сначала «левая» сторона.
-        strip.append(toVertex(base + side));
-        strip.append(toVertex(base - side));
+    const Vertex center = axisCenter(position, halfWidth);
+    const auto arc = [&](int step, qreal sign) {
+        const qreal phi = M_PI * step / kCapFanSteps;
+        const QPointF v = normal * (sign * std::cos(phi)) + direction * (sign * std::sin(phi));
+        return axisVertex(position, normalized(v), halfWidth, 1.0);
+    };
+
+    if (end == CapEnd::Start) {
+        // От правой стороны назад, за начало штриха, к левой:
+        // v(φ) = −n·cosφ − t·sinφ.
+        for (int step = 0; step <= kCapFanSteps; ++step) {
+            strip.append(center);
+            strip.append(arc(step, -1.0));
+        }
+        // Последняя вершина дуги - левая вершина первой пары; правая - следом.
+        // Треугольник «центр, левая, правая» вырожден по площади.
+        strip.append(axisVertex(position, -normal, halfWidth, -1.0));
+        return;
+    }
+
+    // Порядок в паре тот же, что у стыка: сначала «левая» сторона.
+    strip.append(axisVertex(position, normal, halfWidth, 1.0));
+    strip.append(axisVertex(position, -normal, halfWidth, -1.0));
+    // От левой стороны вперёд, за конец штриха, к правой: v(φ) = n·cosφ + t·sinφ.
+    for (int step = 0; step <= kCapFanSteps; ++step) {
+        strip.append(center);
+        strip.append(arc(step, 1.0));
     }
 }
 
@@ -152,142 +190,216 @@ bool StrokeTessellator::isDot(const QList<InkPoint> &points) const
     return true;
 }
 
-void StrokeTessellator::emitDot(QVector<Vertex> &strip, const QList<InkPoint> &points) const
-{
-    // Толщина точки - по самому сильному нажиму касания, а не по слабым его
-    // краям: касание начинается и кончается почти без давления.
-    qreal radius = 0.0;
-    for (const InkPoint &point : points)
-        radius = qMax(radius, halfWidthAt(point));
-    const QPointF from = points.constFirst().position;
-    const QPointF to = points.constLast().position;
-    QPointF direction = normalized(to - from);
-    if (direction.isNull())
-        direction = QPointF(1.0, 0.0);
-    // Два полудиска: при совпадающих концах они складываются в диск.
-    emitCap(strip, from, radius, direction, CapEnd::Start);
-    emitCap(strip, to, radius, direction, CapEnd::End);
-}
-
 void StrokeTessellator::emitJoint(QVector<Vertex> &strip, const QPointF &position, qreal halfWidth,
                                   const QPointF &incoming, const QPointF &outgoing) const
 {
-    const auto emitPair = [&strip](const QPointF &left, const QPointF &right) {
-        strip.append(toVertex(left));
-        strip.append(toVertex(right));
-    };
-
-    const qreal turn =
-        std::atan2(cross(incoming, outgoing), QPointF::dotProduct(incoming, outgoing));
+    const qreal turn = turnAngle(incoming, outgoing);
+    // Внутренняя сторона - та, куда поворачивает штрих: при turn > 0 это
+    // сторона нормали normalOf(direction).
+    const bool turnsLeft = turn > 0.0;
+    const qreal cosHalf = std::cos(turn / 2.0);
 
     if (std::abs(turn) < kRoundJoinThreshold) {
-        // Пологий стык: хватает биссектрисы.
+        // Пологий стык - пара на биссектрисе. Вершина на биссектрисе стоит на
+        // расстоянии вынос·cos(θ/2) от прямых обоих сегментов, отсюда s.
         QPointF bisector = normalized(normalOf(incoming) + normalOf(outgoing));
         if (bisector.isNull())
             bisector = normalOf(outgoing);
-        emitPair(position + bisector * halfWidth, position - bisector * halfWidth);
+        strip.append(axisVertex(position, bisector, halfWidth, cosHalf));
+        strip.append(axisVertex(position, -bisector, halfWidth, -cosHalf));
         return;
     }
 
-    // Резкий стык: снаружи проходим дугой, внутри держим одну точку.
-    // Дуга и есть скругление; внутренняя точка на биссектрисе не даёт
-    // внутренней кромке пересечь саму себя.
-    const bool turnsLeft = turn > 0.0;
+    // Резкий стык (design.md, D7, «Стыки точные»). Треугольник
+    // (внутренняя, O_0, центр) точен относительно прямой входящего сегмента,
+    // веер (O_k, центр, O_k+1) вокруг центра стыка - радиально,
+    // (центр, O_K, внутренняя) - относительно исходящего. Веер из внутренней
+    // точки, как было, на «M» давал p99 ошибки 108/255 против 54.
     const QPointF startNormal = normalOf(incoming) * (turnsLeft ? -1.0 : 1.0);
     const QPointF endNormal = normalOf(outgoing) * (turnsLeft ? -1.0 : 1.0);
-
     const QPointF normalSum = normalOf(incoming) + normalOf(outgoing);
-    QPointF innerDirection = normalized(normalSum);
-    if (turnsLeft)
-        innerDirection = -innerDirection;
-    const bool innerDegenerate =
-        std::hypot(normalSum.x(), normalSum.y()) < kBisectorEpsilon;
-    const QPointF inner = innerDegenerate ? position : position - innerDirection * halfWidth;
+    const bool innerDegenerate = std::hypot(normalSum.x(), normalSum.y()) < kBisectorEpsilon;
+    const QPointF innerDirection = normalized(normalSum) * (turnsLeft ? 1.0 : -1.0);
+    const qreal innerSide = turnsLeft ? 1.0 : -1.0;
+
+    // На развороте почти на 180° биссектрисы нет: внутренняя вершина -
+    // центр стыка.
+    const Vertex inner = innerDegenerate
+        ? axisCenter(position, halfWidth)
+        : axisVertex(position, innerDirection, halfWidth, innerSide * cosHalf);
+    const Vertex center = axisCenter(position, halfWidth);
 
     // Дуга идёт от нормали входящего сегмента к нормали исходящего по
     // короткой стороне. Направление берётся из знака векторного
     // произведения самих нормалей, а не из знака поворота: иначе на
     // повороте в одну из сторон дуга уходит длинным путём и оставляет
     // на стыке непокрытый клин.
-    const qreal arcAngle =
-        std::atan2(cross(startNormal, endNormal), QPointF::dotProduct(startNormal, endNormal));
+    const qreal arcAngle = turnAngle(startNormal, endNormal);
     const int steps = qMax(1, int(std::ceil(std::abs(arcAngle) / kRoundJoinStep)));
+    const auto outer = [&](int step) {
+        return axisVertex(position, rotated(startNormal, arcAngle * (qreal(step) / steps)),
+                          halfWidth, -innerSide);
+    };
 
-    for (int step = 0; step <= steps; ++step) {
-        const qreal angle = arcAngle * (qreal(step) / steps);
-        const qreal c = std::cos(angle);
-        const qreal s = std::sin(angle);
-        const QPointF rotated(startNormal.x() * c - startNormal.y() * s,
-                              startNormal.x() * s + startNormal.y() * c);
-        const QPointF outer = position + rotated * halfWidth;
-        // Порядок в полосе фиксирован: сначала «левая» сторона, потом
-        // «правая», иначе треугольники вывернутся.
-        if (turnsLeft)
-            emitPair(inner, outer);
-        else
-            emitPair(outer, inner);
+    // Порядок в полосе фиксирован: на границах стыка сначала «левая» сторона,
+    // потом «правая», иначе сегмент между стыками вывернется.
+    if (turnsLeft) {
+        strip.append(inner);
+        strip.append(outer(0));
+        for (int step = 1; step <= steps; ++step) {
+            strip.append(center);
+            strip.append(outer(step));
+        }
+        strip.append(inner);
+        strip.append(outer(steps));
+    } else {
+        strip.append(outer(0));
+        strip.append(inner);
+        strip.append(outer(0));
+        for (int step = 1; step <= steps; ++step) {
+            strip.append(center);
+            strip.append(outer(step));
+        }
+        strip.append(inner);
     }
 }
 
-QVector<StrokeTessellator::Vertex> StrokeTessellator::tessellate(const QList<InkPoint> &points) const
+StrokeTessellator::Axis StrokeTessellator::axisOf(const QList<InkPoint> &points) const
 {
-    QVector<Vertex> strip;
+    Axis axis;
     if (points.size() < 2)
-        return strip;
+        return axis;
 
     // Касание без движения или с едва заметным сдвигом - точка, а не
     // чёрточка (design.md, D5). Правило зависит только от сохранённых точек,
     // поэтому сухой вид совпадает с мокрым и с тем, что откроется из файла.
     if (isDot(points)) {
-        strip.reserve(4 * (kCapPairs + 1));
-        emitDot(strip, points);
-        return strip;
-    }
-
-    // Направления сегментов. Вырожденные сегменты (две точки в одном месте)
-    // наследуют направление предыдущего, иначе нормаль была бы неопределена.
-    QList<QPointF> directions;
-    directions.reserve(points.size() - 1);
-    QPointF previous(1.0, 0.0);
-    for (int i = 0; i + 1 < points.size(); ++i) {
-        QPointF direction = normalized(points[i + 1].position - points[i].position);
+        // Капсула от первой до последней точки. Толщина точки - по самому
+        // сильному нажиму касания, а не по слабым его краям: касание
+        // начинается и кончается почти без давления. При совпадающих концах
+        // два полувеера складываются в диск.
+        qreal halfWidth = 0.0;
+        for (const InkPoint &point : points)
+            halfWidth = std::max(halfWidth, halfWidthAt(point));
+        QPointF direction = normalized(points.constLast().position - points.constFirst().position);
         if (direction.isNull())
-            direction = previous;
-        directions.append(direction);
-        previous = direction;
+            direction = QPointF(1.0, 0.0);
+        axis.positions = {points.constFirst().position, points.constLast().position};
+        axis.halfWidths = {halfWidth, halfWidth};
+        axis.directions = {direction};
+        axis.startDirection = direction;
+        axis.endDirection = direction;
+        return axis;
     }
 
-    strip.reserve(points.size() * 4 + 4 * (kCapPairs + 1));
-
-    const qreal startRadius = halfWidthAt(points.first());
-    emitCap(strip, points.first().position, startRadius,
-            capDirection(points, CapEnd::Start, startRadius), CapEnd::Start);
-    for (int i = 1; i + 1 < points.size(); ++i) {
-        emitJoint(strip, points[i].position, halfWidthAt(points[i]), directions[i - 1],
-                  directions[i]);
+    axis.positions.reserve(points.size());
+    axis.halfWidths.reserve(points.size());
+    axis.directions.reserve(points.size() - 1);
+    // Вырожденный сегмент (две точки в одном месте) наследует направление
+    // предыдущего, иначе нормаль была бы неопределена.
+    QPointF previous(1.0, 0.0);
+    for (int i = 0; i < points.size(); ++i) {
+        axis.positions.append(points[i].position);
+        axis.halfWidths.append(halfWidthAt(points[i]));
+        if (i + 1 < points.size()) {
+            QPointF direction = normalized(points[i + 1].position - points[i].position);
+            if (direction.isNull())
+                direction = previous;
+            axis.directions.append(direction);
+            previous = direction;
+        }
     }
-    const qreal endRadius = halfWidthAt(points.last());
-    emitCap(strip, points.last().position, endRadius,
-            capDirection(points, CapEnd::End, endRadius), CapEnd::End);
+    // Направление торца - хорда, а не последний сегмент (D4).
+    axis.startDirection = capDirection(points, CapEnd::Start, axis.halfWidths.constFirst());
+    axis.endDirection = capDirection(points, CapEnd::End, axis.halfWidths.constLast());
+    return axis;
+}
 
+QVector<StrokeTessellator::Vertex> StrokeTessellator::tessellate(const QList<InkPoint> &points) const
+{
+    QVector<Vertex> strip;
+    const Axis axis = axisOf(points);
+    if (axis.positions.size() < 2)
+        return strip;
+
+    strip.reserve(axis.positions.size() * 4 + kStartCapVertices + kEndCapVertices);
+    emitCap(strip, axis.positions.constFirst(), axis.halfWidths.constFirst(), axis.startDirection,
+            CapEnd::Start);
+    for (int i = 1; i + 1 < axis.positions.size(); ++i) {
+        emitJoint(strip, axis.positions[i], axis.halfWidths[i], axis.directions[i - 1],
+                  axis.directions[i]);
+    }
+    emitCap(strip, axis.positions.constLast(), axis.halfWidths.constLast(), axis.endDirection,
+            CapEnd::End);
     return strip;
 }
 
 QPolygonF StrokeTessellator::outline(const QList<InkPoint> &points) const
 {
-    const QVector<Vertex> strip = tessellate(points);
     QPolygonF polygon;
-    if (isDegenerate(strip))
+    const Axis axis = axisOf(points);
+    if (axis.positions.size() < 2)
         return polygon;
 
-    polygon.reserve(strip.size());
-    // Чётные вершины полосы - одна сторона штриха, нечётные - другая.
-    for (int i = 0; i < strip.size(); i += 2)
-        polygon.append(QPointF(strip[i].x, strip[i].y));
-    for (int i = strip.size() - 1; i > 0; i -= 2)
-        polygon.append(QPointF(strip[i].x, strip[i].y));
-    if (!polygon.isEmpty())
-        polygon.append(polygon.first());
+    // Точки контура лежат там, где у полосы на экране проходит кромка |d| = hw:
+    // - вершина дуги (торец, внешняя сторона резкого стыка) - на полуширине;
+    // - вершина на биссектрисе и внутренняя вершина резкого стыка - на
+    //   пересечении кромок соседних сегментов, hw / cos(θ/2).
+    QPolygonF left;
+    QPolygonF right;
+    for (int i = 1; i + 1 < axis.positions.size(); ++i) {
+        const QPointF &c = axis.positions[i];
+        const qreal hw = axis.halfWidths[i];
+        const QPointF &incoming = axis.directions[i - 1];
+        const QPointF &outgoing = axis.directions[i];
+        const qreal turn = turnAngle(incoming, outgoing);
+        const bool turnsLeft = turn > 0.0;
+        const qreal miter = hw / std::max(std::cos(turn / 2.0), 1e-6);
+
+        if (std::abs(turn) < kRoundJoinThreshold) {
+            QPointF bisector = normalized(normalOf(incoming) + normalOf(outgoing));
+            if (bisector.isNull())
+                bisector = normalOf(outgoing);
+            left.append(c + bisector * miter);
+            right.append(c - bisector * miter);
+            continue;
+        }
+
+        const QPointF normalSum = normalOf(incoming) + normalOf(outgoing);
+        const bool innerDegenerate = std::hypot(normalSum.x(), normalSum.y()) < kBisectorEpsilon;
+        const QPointF innerDirection = normalized(normalSum) * (turnsLeft ? 1.0 : -1.0);
+        const QPointF inner = innerDegenerate ? c : c + innerDirection * miter;
+        const QPointF startNormal = normalOf(incoming) * (turnsLeft ? -1.0 : 1.0);
+        const QPointF endNormal = normalOf(outgoing) * (turnsLeft ? -1.0 : 1.0);
+        const qreal arcAngle = turnAngle(startNormal, endNormal);
+        const int steps = qMax(1, int(std::ceil(std::abs(arcAngle) / kRoundJoinStep)));
+
+        (turnsLeft ? left : right).append(inner);
+        QPolygonF &outerSide = turnsLeft ? right : left;
+        for (int step = 0; step <= steps; ++step)
+            outerSide.append(c + rotated(startNormal, arcAngle * (qreal(step) / steps)) * hw);
+    }
+
+    // Дуга торца - те же углы, что у полувеера полосы.
+    const auto capArc = [&polygon](const QPointF &c, qreal hw, const QPointF &direction,
+                                   qreal sign) {
+        const QPointF normal = normalOf(direction);
+        for (int step = 0; step <= kCapFanSteps; ++step) {
+            const qreal phi = M_PI * step / kCapFanSteps;
+            const QPointF v = normal * (sign * std::cos(phi)) + direction * (sign * std::sin(phi));
+            polygon.append(c + normalized(v) * hw);
+        }
+    };
+
+    polygon.reserve(left.size() + right.size() + 2 * (kCapFanSteps + 1) + 1);
+    // От правой стороны начала назад к левой, левая сторона вперёд, от левой
+    // стороны конца вперёд к правой, правая сторона назад.
+    capArc(axis.positions.constFirst(), axis.halfWidths.constFirst(), axis.startDirection, -1.0);
+    polygon += left;
+    capArc(axis.positions.constLast(), axis.halfWidths.constLast(), axis.endDirection, 1.0);
+    for (int i = int(right.size()) - 1; i >= 0; --i)
+        polygon.append(right[i]);
+    polygon.append(polygon.constFirst());
     return polygon;
 }
 
@@ -295,8 +407,9 @@ bool StrokeTessellator::isDegenerate(const QVector<Vertex> &strip)
 {
     if (strip.size() < 4)
         return true;
-    for (const Vertex &vertex : strip) {
-        if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y))
+    for (const Vertex &v : strip) {
+        if (!std::isfinite(v.cx) || !std::isfinite(v.cy) || !std::isfinite(v.nx)
+            || !std::isfinite(v.ny) || !std::isfinite(v.hw) || !std::isfinite(v.s))
             return true;
     }
     return false;

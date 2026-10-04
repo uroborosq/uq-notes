@@ -226,9 +226,11 @@ void uploadStrip(QSGGeometryNode *node, const StrokeTessellator::Vertex *source,
     QSGGeometry *geometry = node->geometry();
     geometry->allocate(count);
     auto *target = geometry->vertexDataAsPoint2D();
+    // Мост до материала чернил: плоский материал под MSAA получает полосу в
+    // покое - вершины на полуширине, без выноса бахромы.
     for (int i = 0; i < count; ++i) {
-        target[i].x = source[i].x;
-        target[i].y = source[i].y;
+        const QPointF p = source[i].at(source[i].hw);
+        target[i].set(float(p.x()), float(p.y()));
     }
     node->markDirty(QSGNode::DirtyGeometry);
 }

@@ -244,8 +244,9 @@ private slots:
         QVERIFY(page >= 0);
 
         QVERIFY(m_canvas.beginInkAt(at, 0.5, false));
-        // Мокрая точка видна под пером до отрыва: диск из двух полудисков.
-        QVERIFY2(m_canvas.wetStripVertexCount() >= 4 * (StrokeTessellator::kCapPairs + 1),
+        // Мокрая точка видна под пером до отрыва: диск из двух полувееров.
+        QVERIFY2(m_canvas.wetStripVertexCount()
+                     >= StrokeTessellator::kStartCapVertices + StrokeTessellator::kEndCapVertices,
                  qPrintable(QStringLiteral("мокрая полоса: %1 вершин")
                                 .arg(m_canvas.wetStripVertexCount())));
         m_canvas.endInk();
@@ -381,8 +382,9 @@ private slots:
             qreal top = 1e9;
             qreal bottom = -1e9;
             for (const StrokeTessellator::Vertex &vertex : strip) {
-                top = qMin(top, qreal(vertex.y));
-                bottom = qMax(bottom, qreal(vertex.y));
+                const QPointF edge = vertex.at(vertex.hw);
+                top = qMin(top, edge.y());
+                bottom = qMax(bottom, edge.y());
             }
             const qreal width = bottom - top;
             QVERIFY2(qAbs(width - 4.0 * specs[i].expectedFactor) < 1e-3,
@@ -799,11 +801,8 @@ private slots:
         tessellator.setStyle(drawn.style);
         const QVector<StrokeTessellator::Vertex> strip = tessellator.tessellate(drawn.points);
         QVERIFY(!tessellator.outline(drawn.points).isEmpty());
-        // Торец - последние 2·(K + 1) вершин полосы; первая его пара -
-        // боковая, c ± r·n, её середина - центр дуги торца (design.md, D4).
-        const int capStart = int(strip.size()) - 2 * (StrokeTessellator::kCapPairs + 1);
-        const QPointF capCenter((strip[capStart].x + strip[capStart + 1].x) / 2.0,
-                                (strip[capStart].y + strip[capStart + 1].y) / 2.0);
+        // У всех вершин конечного торца центр - точка отрыва (design.md, D7).
+        const QPointF capCenter = strip.constLast().center();
         QVERIFY2(std::hypot(capCenter.x() - lastContact.x(), capCenter.y() - lastContact.y())
                      < 1e-3,
                  "торец контура экспорта не в точке отрыва");
