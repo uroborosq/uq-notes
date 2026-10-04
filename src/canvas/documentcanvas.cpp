@@ -1249,6 +1249,21 @@ bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeG
     if (budgetExhausted)
         return false;
 
+    // Отрыв пера добавляет в конец один штрих: ему - один новый узел, старые
+    // узлы не пересоздаются. Батч-рендер всё равно перезальёт слитый батч
+    // сухих чернил (узел добавлен под корнем батча), но без пересборки всех
+    // полос страницы на CPU.
+    if (layer.dryInk && ids.size() == layer.dryInkIds.size() + 1
+        && std::equal(layer.dryInkIds.cbegin(), layer.dryInkIds.cend(), ids.cbegin())) {
+        const StrokeGeometry &entry = geometry.last();
+        QSGGeometryNode *strokeNode = makeStripNode(entry.color, InkMaterial::Layer::Dry);
+        uploadStrip(strokeNode, entry.strip.constData(), entry.strip.size());
+        layer.dryInk->appendChildNode(strokeNode);
+        layer.dryInkIds = ids;
+        ++m_dryInkNodeRebuilds;
+        return true;
+    }
+
     if (layer.dryInk) {
         layer.dryInk->parent()->removeChildNode(layer.dryInk);
         delete layer.dryInk;
