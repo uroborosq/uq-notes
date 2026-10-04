@@ -949,6 +949,12 @@ ApplicationWindow {
 
         sourceComponent: Rectangle {
             objectName: "frameStatsHud"
+            // Своим слоем: текст сводки меняется на каждом кадре, и без слоя
+            // его узел пересоздаётся прямо в графе сцены окна - добавление
+            // узла вне корня батча заставляет батч-рендер пересобрать и
+            // перезалить всё, вместе с чернилами страниц. На плотной странице
+            // это миллисекунды на каждом кадре, и замер мерил бы сам себя.
+            layer.enabled: true
             width: hudText.implicitWidth + 20
             height: hudText.implicitHeight + 14
             radius: 4
