@@ -17,9 +17,13 @@ license=('custom')
 # abseil-cpp нужен модели траектории штриха (third_party/ink-stroke-modeler).
 # Библиотеки Abseil линкуются динамически: после обновления abseil-cpp с новым
 # soname пакет надо пересобрать.
+# wayland и libxkbcommon бинарник линкует напрямую: wayland-client - замер
+# задержки до показа (wp_presentation), xkbcommon приходит с Qt6::GuiPrivate.
+# wayland-protocols и wayland-scanner (пакет wayland) нужны сборке: из них
+# генерируется код протокола.
 depends=('qt6-base' 'qt6-declarative' 'qt6-webengine' 'qt6-wayland' 'qpdf' 'abseil-cpp'
-         'hicolor-icon-theme')
-makedepends=('cmake' 'librsvg' 'qt6-shadertools')
+         'wayland' 'libxkbcommon' 'hicolor-icon-theme')
+makedepends=('cmake' 'librsvg' 'qt6-shadertools' 'wayland-protocols')
 optdepends=('poppler: сторонняя проверка экспортированных PDF')
 
 source=()
