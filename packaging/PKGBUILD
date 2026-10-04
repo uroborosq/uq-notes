@@ -6,7 +6,7 @@
 
 pkgname=uq-notes
 # Держать в согласии с project(... VERSION ...) в корневом CMakeLists.txt.
-pkgver=0.9.0
+pkgver=0.10.0
 pkgrel=1
 pkgdesc="Рукописные заметки поверх PDF для Wayland: перо с нажимом, оглавление, экспорт"
 arch=('x86_64')

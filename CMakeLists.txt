@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 # C - только для кода протокола wp_presentation, который генерирует
 # wayland-scanner (src/CMakeLists.txt).
-project(uq-notes VERSION 0.9.0 LANGUAGES C CXX)
+project(uq-notes VERSION 0.10.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
