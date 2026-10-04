@@ -134,6 +134,9 @@ public:
     // Готовая полоса штриха страницы из кэша геометрии; пустая - штриха там
     // нет. По ней тесты видят, каким законом толщины штрих нарисован.
     QVector<StrokeTessellator::Vertex> inkGeometryStrip(int page, quint64 id) const;
+    // Сколько штрихов тесселировано с создания холста. Отрыв пера на странице
+    // с N штрихами тесселирует один штрих, а не N + 1.
+    int tessellatedStrokeCount() const { return m_tessellatedStrokes; }
     // Как чернила страницы стоят относительно её растра в графе сцены.
     // «Поверх» - утверждение сразу о двух слоях, поэтому отсутствие любого из
     // них - это отдельный ответ, а не «не поверх». Мокрый штрих при этом обязан
@@ -438,8 +441,18 @@ private:
 
     QHash<int, QList<StrokeGeometry>> m_inkGeometry;
     QSet<int> m_inkDirtyPages;
+    // Идентификаторы записей, по которым собрана геометрия страницы, - все,
+    // и вырожденные штрихи, которых в геометрии нет. По ним видно, что
+    // отрыв пера добавил штрих в конец: тесселируется только он.
+    QHash<int, QList<quint64>> m_inkRecordIds;
 
     QList<StrokeGeometry> tessellate(const QList<InkDocument::Record> &records) const;
+    // Геометрия записей records: дописывает новые в конце к кэшу, если записи -
+    // это кэш и что-то после него, иначе собирает заново.
+    void updateGeometryCache(QList<StrokeGeometry> &geometry, QList<quint64> &ids,
+                             const QList<InkDocument::Record> &records) const;
+    // Сколько штрихов тесселировано за жизнь холста: диагностика для тестов.
+    mutable int m_tessellatedStrokes = 0;
 
     // Куда включить узел чернил поверхности: у страницы - на место слоя, у
     // вкладыша - под узел обрезки. Страница и вкладыш заливают чернила одним
@@ -465,6 +478,7 @@ private:
     // Геометрия чернил раскрытых вкладышей удерживаемых страниц.
     QHash<quint64, QList<StrokeGeometry>> m_insertGeometry;
     QSet<quint64> m_insertDirty;
+    QHash<quint64, QList<quint64>> m_insertRecordIds;
     // Страницы зоны удержания: по ним живут геометрия, узлы и модель вкладышей.
     QSet<int> m_keepPages;
     InsertListModel *m_insertModel = nullptr;

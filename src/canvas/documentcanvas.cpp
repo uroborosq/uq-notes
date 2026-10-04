@@ -951,6 +951,12 @@ void DocumentCanvas::updateVisiblePages()
             ++it;
         }
     }
+    for (auto it = m_inkRecordIds.begin(); it != m_inkRecordIds.end();) {
+        if (!keepSet.contains(it.key()))
+            it = m_inkRecordIds.erase(it);
+        else
+            ++it;
+    }
     for (int page : keep)
         ensureInkGeometry(page);
 
@@ -1448,8 +1454,10 @@ void DocumentCanvas::setInk(InkDocument *ink)
     m_ink = ink;
     m_inkGeometry.clear();
     m_inkDirtyPages.clear();
+    m_inkRecordIds.clear();
     m_insertGeometry.clear();
     m_insertDirty.clear();
+    m_insertRecordIds.clear();
     m_insertZOrder.clear();
 
     if (m_ink) {
@@ -1716,6 +1724,7 @@ void DocumentCanvas::onInkReloaded()
 {
     m_inkGeometry.clear();
     m_inkDirtyPages.clear();
+    m_inkRecordIds.clear();
     for (auto it = m_pages.cbegin(); it != m_pages.cend(); ++it) {
         m_inkDirtyPages.insert(it.key());
         ensureInkGeometry(it.key());
@@ -1726,6 +1735,7 @@ void DocumentCanvas::onInkReloaded()
         cancelInk();
     m_insertGeometry.clear();
     m_insertDirty.clear();
+    m_insertRecordIds.clear();
     m_insertZOrder.clear();
     if (m_ink) {
         for (const InkInsert &insert : m_ink->allInserts())
@@ -1743,12 +1753,35 @@ void DocumentCanvas::ensureInkGeometry(int page)
     if (m_inkGeometry.contains(page) && !m_inkDirtyPages.contains(page))
         return;
 
-    const QList<StrokeGeometry> geometry = tessellate(m_ink->strokesOnPage(page));
-    if (geometry.isEmpty())
-        m_inkGeometry.remove(page);
-    else
+    QList<StrokeGeometry> geometry = m_inkGeometry.take(page);
+    QList<quint64> &ids = m_inkRecordIds[page];
+    updateGeometryCache(geometry, ids, m_ink->strokesOnPage(page));
+    if (!geometry.isEmpty())
         m_inkGeometry.insert(page, geometry);
     m_inkDirtyPages.remove(page);
+}
+
+void DocumentCanvas::updateGeometryCache(QList<StrokeGeometry> &geometry, QList<quint64> &ids,
+                                         const QList<InkDocument::Record> &records) const
+{
+    // Записи - это закэшированные и новые в конце: отрыв пера, повтор,
+    // отмена стирания. Штрих в модели неизменяем, а его тесселяция от вида не
+    // зависит, поэтому геометрия прежних штрихов при тех же id та же, и
+    // тесселируются только новые. Сравниваются записи, а не геометрия:
+    // вырожденные штрихи в геометрию не попадают.
+    const bool appended = !ids.isEmpty() && records.size() > ids.size()
+                          && std::equal(ids.cbegin(), ids.cend(), records.cbegin(),
+                                        [](quint64 id, const InkDocument::Record &record) {
+                                            return id == record.id;
+                                        });
+    if (!appended) {
+        geometry.clear();
+        ids.clear();
+    }
+    const QList<InkDocument::Record> fresh = records.mid(ids.size());
+    geometry.append(tessellate(fresh));
+    for (const InkDocument::Record &record : fresh)
+        ids.append(record.id);
 }
 
 QList<DocumentCanvas::StrokeGeometry>
@@ -1756,6 +1789,7 @@ DocumentCanvas::tessellate(const QList<InkDocument::Record> &records) const
 {
     QList<StrokeGeometry> geometry;
     StrokeTessellator tessellator;
+    m_tessellatedStrokes += int(records.size());
     for (const InkDocument::Record &record : records) {
         tessellator.setWidth(record.stroke.width);
         // Каждый штрих - своим законом толщины: нанесённые до заострения
@@ -1775,6 +1809,7 @@ void DocumentCanvas::dropInkGeometry(int page)
 {
     m_inkGeometry.remove(page);
     m_inkDirtyPages.remove(page);
+    m_inkRecordIds.remove(page);
 }
 
 // --- Вкладыши -----------------------------------------------------------------
@@ -1914,6 +1949,7 @@ void DocumentCanvas::onInsertRemoved(quint64 id)
     m_insertZOrder.removeOne(id);
     m_insertGeometry.remove(id);
     m_insertDirty.remove(id);
+    m_insertRecordIds.remove(id);
     syncInsertModel();
     update();
 }
@@ -1933,7 +1969,8 @@ void DocumentCanvas::ensureInsertGeometry(quint64 id)
         return;
     // Пустой список тоже хранится: так пустой раскрытый вкладыш не
     // тесселируется заново на каждом кадре панорамы.
-    m_insertGeometry.insert(id, tessellate(m_ink->strokesInInsert(id)));
+    QList<StrokeGeometry> &geometry = m_insertGeometry[id];
+    updateGeometryCache(geometry, m_insertRecordIds[id], m_ink->strokesInInsert(id));
     m_insertDirty.remove(id);
 }
 
@@ -1944,14 +1981,17 @@ void DocumentCanvas::syncInsertGeometry()
     if (!m_ink) {
         m_insertGeometry.clear();
         m_insertDirty.clear();
+        m_insertRecordIds.clear();
         return;
     }
     for (auto it = m_insertGeometry.begin(); it != m_insertGeometry.end();) {
         const InkInsert insert = m_ink->insertById(it.key());
-        if (!insert.open || !m_keepPages.contains(insert.page))
+        if (!insert.open || !m_keepPages.contains(insert.page)) {
+            m_insertRecordIds.remove(it.key());
             it = m_insertGeometry.erase(it);
-        else
+        } else {
             ++it;
+        }
     }
     for (quint64 id : std::as_const(m_insertZOrder)) {
         const InkInsert insert = m_ink->insertById(id);

@@ -11,6 +11,7 @@
 #include <QTouchEvent>
 
 #include <cstdint>
+#include <cstring>
 
 #include "canvas/documentcanvas.h"
 #include "fixtures.h"
@@ -530,6 +531,101 @@ private slots:
 
         m_ink.redo();
         QCOMPARE(m_canvas.inkGeometryStrokeCount(page), 1);
+    }
+
+    // Отрыв пера на странице с N штрихами тесселирует один новый штрих, а не
+    // всю страницу заново: на плотной странице полная тесселяция - десятки
+    // миллисекунд на потоке UI на каждый отрыв. Геометрия при этом та же, что
+    // у полной пересборки, в том числе когда на странице есть вырожденный
+    // штрих, которого в геометрии нет (ink-beauty-pass, рецензия группы 12).
+    void liftTessellatesOnlyTheNewStroke()
+    {
+        m_canvas.goToPage(0);
+        const QPointF at(450, 350);
+        const int page = m_canvas.pageAtView(at);
+        QVERIFY(page >= 0);
+
+        constexpr int kLoaded = 30;
+        QList<InkDocument::Record> records;
+        for (int i = 0; i < kLoaded; ++i) {
+            Stroke stroke;
+            stroke.page = page;
+            stroke.width = 2.0;
+            stroke.style = StrokeStyle::Tapered;
+            // Пятый штрих без точек вырожден: в геометрию он не попадает.
+            if (i != 5) {
+                for (int k = 0; k <= 30; ++k)
+                    stroke.points.append({QPointF(40 + k * 6.0, 60 + i * 12.0), 0.6, k / 200.0});
+            }
+            records.append({quint64(i + 1), stroke});
+        }
+        m_ink.loadStrokes(records, kLoaded + 1);
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), kLoaded - 1);
+
+        // Геометрия кэша против полной тесселяции записей страницы.
+        const auto matchesFullRebuild = [&] {
+            StrokeTessellator tessellator;
+            int compared = 0;
+            for (const InkDocument::Record &record : m_ink.strokesOnPage(page)) {
+                tessellator.setWidth(record.stroke.width);
+                tessellator.setStyle(record.stroke.style);
+                const QVector<StrokeTessellator::Vertex> expected =
+                    tessellator.tessellate(record.stroke.points);
+                const QVector<StrokeTessellator::Vertex> cached =
+                    m_canvas.inkGeometryStrip(page, record.id);
+                if (StrokeTessellator::isDegenerate(expected)) {
+                    if (!cached.isEmpty())
+                        return false;
+                    continue;
+                }
+                if (cached.size() != expected.size()
+                    || std::memcmp(cached.constData(), expected.constData(),
+                                   size_t(cached.size()) * sizeof(StrokeTessellator::Vertex))
+                           != 0)
+                    return false;
+                ++compared;
+            }
+            return compared == m_canvas.inkGeometryStrokeCount(page);
+        };
+        QVERIFY(matchesFullRebuild());
+
+        int before = m_canvas.tessellatedStrokeCount();
+        drawLine(&m_canvas, at, at + QPointF(90, 40));
+        QCOMPARE(m_canvas.tessellatedStrokeCount() - before, 1);
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), kLoaded);
+        QVERIFY(matchesFullRebuild());
+
+        // Отмена убирает штрих из середины истории - полная пересборка; повтор
+        // возвращает его в конец - снова один штрих.
+        m_ink.undo();
+        QCOMPARE(m_canvas.inkGeometryStrokeCount(page), kLoaded - 1);
+        before = m_canvas.tessellatedStrokeCount();
+        m_ink.redo();
+        QCOMPARE(m_canvas.tessellatedStrokeCount() - before, 1);
+        QVERIFY(matchesFullRebuild());
+
+        // Стирание - пересборка без стёртого.
+        m_canvas.setTool(DocumentCanvas::Tool::Eraser);
+        drawLine(&m_canvas, QPointF(450, 300), QPointF(450, 420));
+        m_canvas.setTool(DocumentCanvas::Tool::Pen);
+        QVERIFY(m_ink.strokeCount() < kLoaded + 1);
+        QVERIFY(matchesFullRebuild());
+    }
+
+    // Во вкладыше отрыв пера тоже тесселирует только новый штрих.
+    void insertLiftTessellatesOnlyTheNewStroke()
+    {
+        m_canvas.goToPage(0);
+        const quint64 id = placeInsert(QPointF(400, 150));
+        QVERIFY(id != 0);
+        for (int i = 0; i < 5; ++i)
+            drawLine(&m_canvas, QPointF(420, 180 + i * 8), QPointF(520, 190 + i * 8));
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 5);
+
+        const int before = m_canvas.tessellatedStrokeCount();
+        drawLine(&m_canvas, QPointF(420, 230), QPointF(520, 240));
+        QCOMPARE(m_canvas.tessellatedStrokeCount() - before, 1);
+        QCOMPARE(m_canvas.insertGeometryStrokeCount(id), 6);
     }
 
     // Чернила на странице, загруженной из файла, видны без движения вида.
