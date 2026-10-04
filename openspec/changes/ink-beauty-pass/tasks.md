@@ -11025,10 +11025,11 @@ EOF
   CPU-зеркалом (`tst_inkcoverage`, `tst_inkparity`), раскладка `.qsb` - отражением
   (`tst_inkmaterial`). `aa-gpu-bench` стенда гоняет шейдеры прототипа, а не
   `src/canvas/shaders/`.
-- Разделение типов сухого и мокрого слоя и ключи кусков проверены только структурно
-  (`tst_pagescenegraph`, программный бэкенд) и по журналу на устройстве (14.2). На
-  настоящем батч-рендере проверено слияние полос `InkMaterial` и неперезаливка при
-  зуме (12.9), но не поведение мокрого слоя.
+- Разделение типов сухого и мокрого слоя и ключи кусков проверены структурно
+  (`tst_pagescenegraph`, программный бэкенд) и на настоящем батч-рендере по журналу
+  `QSG_RENDERER_DEBUG=upload`: `tst_inkmaterialgpu::wetInkDoesNotReuploadDryBatch`,
+  `liftUsesRecentSlotAndIdleMovesItOnce`, `longStrokeNeverReuploadsDryBatch`
+  (запускаются вручную под Wayland, под offscreen - SKIP). Драйвер устройства - 14.2.
 - Программный бэкенд Qt Quick (`QT_QUICK_BACKEND=software`): узлы с материалом он не
   рисует - так было и с `QSGFlatColorMaterial`.
 - Границы узлов для проверки перекрытий в батч-рендере: Qt берёт их по атрибуту-позиции,
@@ -11401,7 +11402,7 @@ EOF
 Run: `cmake --build build -j$(nproc) && ctest --test-dir build --output-on-failure`
 Expected: `100% tests passed` (`tst_idleframes` без графической сессии сообщает SKIP).
 
-- [ ] 16.2 **Сверка со спекой**
+- [x] 16.2 **Сверка со спекой**
 
 Пройти сценарии `openspec/changes/ink-beauty-pass/specs/ink-input/spec.md` и
 `specs/note-storage/spec.md` и для каждого назвать тест или ручную проверку на
