@@ -1106,6 +1106,7 @@ void DocumentCanvas::releaseResources()
     // придётся создать заново из свежих растров. Снимать уже нечего, и вернуть
     // из очереди тоже нечего - текстур, на которые она ссылается, больше нет.
     m_nodes.clear();
+    m_spareNodes.clear();
     m_droppedPages.clear();
     m_insertNodes.clear();
     m_pagesRoot = nullptr;
@@ -1132,6 +1133,7 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     if (!root) {
         root = new QSGTransformNode;
         m_nodes.clear();
+        m_spareNodes.clear();
         m_droppedPages.clear();
         // Два постоянных слоя: страницы и поверх них вкладыши. Так вкладыш
         // рисуется поверх любой страницы, в каком бы порядке страницы ни
@@ -1166,8 +1168,7 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             break;
         }
         if (PageSceneNode *node = m_nodes.take(it.key())) {
-            m_pagesRoot->removeChildNode(node);
-            delete node;
+            parkPageNode(node);
             ++removals;
         }
         it = m_droppedPages.erase(it);
@@ -1193,6 +1194,11 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             continue;
 
         PageSceneNode *node = m_nodes.value(page);
+        if (!node && !m_spareNodes.isEmpty()) {
+            node = m_spareNodes.takeLast();
+            node->page = page;
+            m_nodes.insert(page, node);
+        }
         if (!node) {
             node = new PageSceneNode(page);
             m_pagesRoot->appendChildNode(node);
@@ -1274,6 +1280,50 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         QMetaObject::invokeMethod(this, "update", Qt::QueuedConnection);
 
     return root;
+}
+
+void DocumentCanvas::parkPageNode(PageSceneNode *node)
+{
+    // Узлы в запасе не удаляются: новый узел создаётся, только когда запас
+    // пуст, поэтому узлов всего - не больше, чем страниц бывало в зоне
+    // удержания одновременно. Удалённый на сужении зоны узел (зум туда и
+    // обратно меняет её на десятки страниц) на расширении пришлось бы
+    // создать заново, а новый корень батча - тоже полная пересборка. Пустой
+    // узел - около 70 пустых узлов пулов чернил, десятки КБ.
+    // Снимаются только узлы-листья и простые узлы: удаление листьев под
+    // корнем батча полной пересборки не требует. Текстура освобождается
+    // вместе со своим узлом - по одной странице за кадр, как раньше.
+    const auto drop = [node](QSGNode *&child) {
+        if (!child)
+            return;
+        node->removeChildNode(child);
+        delete child;
+        child = nullptr;
+    };
+    QSGNode *texture = node->texture;
+    QSGNode *placeholder = node->placeholder;
+    drop(texture);
+    drop(placeholder);
+    node->texture = nullptr;
+    node->placeholder = nullptr;
+    InkLayerNodes &ink = node->ink;
+    drop(ink.dryInk);
+    ink.dryInkIds.clear();
+    ink.built = false;
+    if (ink.recent) {
+        for (int slot = 0; slot < ink.recent->size(); ++slot)
+            ink.recent->clear(slot);
+    }
+    ink.recentIds.clear();
+    if (ink.wet) {
+        for (int index = 0; index < ink.wet->size(); ++index)
+            ink.wet->clear(index);
+    }
+    ink.wetUsedChunks = 0;
+    ink.wetStrokeSerial = -1;
+    ink.wetSettledCount = 0;
+    node->page = -1;
+    m_spareNodes.append(node);
 }
 
 // Пулы недавних штрихов и мокрого штриха появляются вместе с узлом
