@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <QSGClipNode>
 #include <QSGGeometryNode>
 #include <QSGSimpleRectNode>
@@ -14,6 +15,7 @@
 
 #include "canvas/insertlistmodel.h"
 #include "canvas/inkmaterial.h"
+#include "canvas/inknodepool.h"
 #include "pdf/pagerenderservice.h"
 #include "pdf/pdfdocumentmodel.h"
 #include "perf/framestats.h"
@@ -23,6 +25,12 @@ namespace {
 // Задержка после последнего изменения масштаба, по истечении которой страницы
 // перерисовываются под новое разрешение.
 constexpr int kLodSettleMs = 120;
+
+// Простой пера и вида, после которого недавние штрихи переезжают в сухой слой.
+// Перенос перезаливает слитый батч сухих чернил страницы - один длинный кадр
+// на плотной странице, - поэтому он ждёт паузы, а не идёт на каждом отрыве:
+// на беглом письме отрывов 2-4 в секунду, паузы между словами короче.
+constexpr int kRecentFlushMs = 700;
 
 // Инерция: экспоненциальное затухание с постоянной времени kFlickTau и
 // остановкой на пороге kFlickStopSpeed. Значения подобраны так, чтобы бросок
@@ -67,25 +75,29 @@ constexpr qreal kMovingResolutionScale = 0.5;
 
 } // namespace
 
-// Чернила одной поверхности в графе сцены - страницы или вкладыша.
+// Чернила одной поверхности в графе сцены - страницы или вкладыша. Слои снизу
+// вверх: сухие, недавние, мокрый штрих.
 struct InkLayerNodes
 {
     // Сухие чернила: узел на штрих, чтобы у каждого был свой цвет.
     QSGNode *dryInk = nullptr;
     QList<quint64> dryInkIds;
 
+    // Недавние штрихи: законченные после последнего простоя. Отрыв пера
+    // кладёт новый штрих в свободный слот пула, а не узлом в сухой слой:
+    // добавление узла под корнем батча перезалило бы слитый батч сухих чернил
+    // страницы (на плотной странице - 26 МБ, кадр около 12 мс). В сухой слой
+    // они переезжают разом, когда перо и вид в покое (DocumentCanvas,
+    // kRecentFlushMs). recentIds - штрихи слотов 0..n-1 в порядке фиксации.
+    std::unique_ptr<InkNodePool> recent;
+    QList<quint64> recentIds;
+
     // Мокрый штрих разложен на куски постоянного размера: заполненный кусок
     // больше не трогается, а на кадр перезаливается только последний,
     // незаполненный. Так объём работы на кадр не зависит от длины штриха.
-    //
-    // Слой и куски - пул, который живёт, пока живёт узел поверхности: между
-    // штрихами куски пустеют, а не удаляются. Добавление любого узла под
-    // корнем батча заставляет батч-рендер Qt Quick пересобрать все батчи
-    // этого корня, и слитый батч сухих чернил плотной страницы (десятки МБ)
-    // перезаливался бы на каждом касании пером и на каждом новом куске
-    // (design.md ink-beauty-pass, D7).
-    QSGNode *wetInk = nullptr;
-    QList<QSGGeometryNode *> wetChunks;
+    // Куски - пул, который живёт, пока живёт узел поверхности: между
+    // штрихами куски пустеют, а не удаляются (design.md ink-beauty-pass, D7).
+    std::unique_ptr<InkNodePool> wet;
     // Сколько кусков пула заняты нынешним штрихом; остальные пусты.
     int wetUsedChunks = 0;
     // Номер штриха, который лежит в кусках: по нему виден новый штрих, даже
@@ -94,6 +106,9 @@ struct InkLayerNodes
     // Длина окончательной части полосы мокрого штриха на прошлом кадре: до неё
     // куски не перезаливаются.
     int wetSettledCount = 0;
+
+    QSGNode *recentInk() const { return recent ? recent->node() : nullptr; }
+    QSGNode *wetInk() const { return wet ? wet->node() : nullptr; }
 };
 
 // Узел страницы: собственная система координат страницы, заполнитель под
@@ -111,6 +126,7 @@ public:
         PlaceholderLayer,
         RasterLayer,
         DryInkLayer,
+        RecentInkLayer,
         WetInkLayer,
     };
 
@@ -144,7 +160,9 @@ private:
             return RasterLayer;
         if (child == ink.dryInk)
             return DryInkLayer;
-        if (child == ink.wetInk)
+        if (child == ink.recentInk())
+            return RecentInkLayer;
+        if (child == ink.wetInk())
             return WetInkLayer;
         return PlaceholderLayer; // заполнитель и всё неопознанное - в самый низ
     }
@@ -222,57 +240,22 @@ constexpr int kWetChunkOverlap = 2;
 // только при первом таком переполнении на поверхности.
 constexpr int kWetPoolInitialChunks = 4;
 
-static_assert(sizeof(StrokeTessellator::Vertex) == 24, "раскладка InkMaterial::attributes()");
-
-// Узел полосы чернил. batchKey различает куски мокрого штриха: каждый - свой
-// батч, на событие пера перезаливается только изменившийся.
-QSGGeometryNode *makeStripNode(const QColor &color, InkMaterial::Layer layer, int batchKey = 0)
-{
-    auto *node = new QSGGeometryNode;
-
-    auto *geometry = new QSGGeometry(InkMaterial::attributes(), 0);
-    geometry->setDrawingMode(QSGGeometry::DrawTriangleStrip);
-    node->setGeometry(geometry);
-    node->setFlag(QSGNode::OwnsGeometry, true);
-
-    auto *material = new InkMaterial(layer);
-    material->setColor(color);
-    material->setBatchKey(batchKey);
-    node->setMaterial(material);
-    node->setFlag(QSGNode::OwnsMaterial, true);
-
-    return node;
-}
-
-void uploadStrip(QSGGeometryNode *node, const StrokeTessellator::Vertex *source, int count)
-{
-    QSGGeometry *geometry = node->geometry();
-    geometry->allocate(count);
-    std::memcpy(geometry->vertexData(), source, size_t(count) * sizeof(StrokeTessellator::Vertex));
-    node->markDirty(QSGNode::DirtyGeometry);
-}
-
-// Пустой кусок пула: без вершин он не попадает ни в один батч и не рисуется.
-void clearWetChunk(QSGGeometryNode *node)
-{
-    node->geometry()->allocate(0);
-    node->markDirty(QSGNode::DirtyGeometry);
-}
-
-// Кусок пула под новый штрих. Пустой кусок батча не имеет, а DirtyGeometry у
-// элемента без батча перестройку батчей не заказывает - кусок остался бы
-// невидимым. DirtyMaterial заказывает её (BuildBatches): батч получают только
-// элементы без батча, слитый батч сухих чернил не трогается.
-void reviveWetChunk(QSGGeometryNode *node, const QColor &color)
-{
-    static_cast<InkMaterial *>(node->material())->setColor(color);
-    node->markDirty(QSGNode::DirtyMaterial);
-}
+// Слотов недавних штрихов на поверхность. Переполнение - немедленный перенос
+// в сухой слой, редкий всплеск: столько штрихов без паузы в 0.7 с не пишут.
+constexpr int kRecentSlots = 64;
+// Ключи батча недавних слотов - за пределами кусков мокрого штриха: тип
+// материала у них общий, и слоты не должны сливаться с кусками.
+constexpr int kRecentBatchKeyBase = 1 << 16;
 
 // В пуле лежит мокрый штрих: хотя бы один кусок с вершинами.
 bool hasWetInk(const InkLayerNodes &layer)
 {
     return layer.wetUsedChunks > 0;
+}
+
+bool hasRecentInk(const InkLayerNodes &layer)
+{
+    return !layer.recentIds.isEmpty();
 }
 
 int wetChunkStart(int index)
@@ -313,6 +296,30 @@ DocumentCanvas::DocumentCanvas(QQuickItem *parent)
 
     m_flickTimer.setInterval(kFlickIntervalMs);
     connect(&m_flickTimer, &QTimer::timeout, this, &DocumentCanvas::stepFlick);
+
+    m_recentFlushTimer.setSingleShot(true);
+    m_recentFlushTimer.setInterval(kRecentFlushMs);
+    connect(&m_recentFlushTimer, &QTimer::timeout, this, [this] {
+        m_flushRecentRequested = true;
+        update();
+    });
+    // Зум и прокрутка - не простой: перенос подождёт их конца.
+    connect(this, &DocumentCanvas::viewChanged, this, [this] {
+        if (m_recentFlushTimer.isActive())
+            restartRecentFlush();
+    });
+}
+
+void DocumentCanvas::restartRecentFlush()
+{
+    m_recentFlushTimer.start();
+}
+
+void DocumentCanvas::flushRecentInk()
+{
+    m_recentFlushTimer.stop();
+    m_flushRecentRequested = true;
+    update();
 }
 
 DocumentCanvas::~DocumentCanvas() = default;
@@ -391,10 +398,10 @@ int wetCoveredVertexCount(const InkLayerNodes &layer)
     if (!hasWetInk(layer))
         return -1;
     int covered = 0;
-    for (int index = 0; index < layer.wetChunks.size(); ++index) {
+    for (int index = 0; index < layer.wet->size(); ++index) {
         // Пустой кусок пула ничего не покрывает; кусок со старой геометрией
         // за концом полосы - покрывает и даёт число больше её длины.
-        const int count = layer.wetChunks[index]->geometry()->vertexCount();
+        const int count = layer.wet->vertexCount(index);
         if (count > 0)
             covered = qMax(covered, wetChunkStart(index) + count);
     }
@@ -422,14 +429,16 @@ int DocumentCanvas::wetInsertCoveredVertexCount(quint64 id) const
 DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
 {
     PageSceneNode *node = m_nodes.value(page);
-    // Слой мокрого штриха живёт и между штрихами, пустым: чернилами он
-    // считается, только пока в нём есть вершины.
+    // Слои недавних штрихов и мокрого штриха живут и пустыми: чернилами они
+    // считаются, только пока в них есть вершины.
+    const bool recent = node && hasRecentInk(node->ink);
     const bool wet = node && hasWetInk(node->ink);
-    if (!node || !node->texture || (!node->ink.dryInk && !wet))
+    if (!node || !node->texture || (!node->ink.dryInk && !recent && !wet))
         return InkLayering::Incomplete;
 
     bool rasterSeen = false;
     bool dryInkSeen = false;
+    bool recentSeen = false;
     for (QSGNode *child = node->firstChild(); child; child = child->nextSibling()) {
         if (child == node->texture) {
             rasterSeen = true;
@@ -437,10 +446,14 @@ DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
             if (!rasterSeen)
                 return InkLayering::BelowRaster;
             dryInkSeen = true;
-        } else if (child == node->ink.wetInk && wet) {
+        } else if (child == node->ink.recentInk() && recent) {
+            if (!rasterSeen || (node->ink.dryInk && !dryInkSeen))
+                return InkLayering::BelowRaster; // недавние ушли под сухие чернила
+            recentSeen = true;
+        } else if (child == node->ink.wetInk() && wet) {
             if (!rasterSeen)
                 return InkLayering::BelowRaster;
-            if (node->ink.dryInk && !dryInkSeen)
+            if ((node->ink.dryInk && !dryInkSeen) || (recent && !recentSeen))
                 return InkLayering::BelowRaster; // мокрый штрих ушёл под сухие чернила
         }
     }
@@ -454,24 +467,31 @@ DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) cons
     if (!node)
         return stats;
 
+    enum class Kind { Dry, Recent, Wet };
     QList<QSGMaterialType *> dryTypes;
     const InkMaterial *previousWet = nullptr;
-    const auto visit = [&](QSGNode *layer, InkMaterial::Layer expected) {
+    const auto visit = [&](QSGNode *layer, Kind kind) {
         if (!layer)
             return;
-        const bool wet = expected == InkMaterial::Layer::Wet;
+        const InkMaterial::Layer expected =
+            kind == Kind::Dry ? InkMaterial::Layer::Dry : InkMaterial::Layer::Wet;
         for (QSGNode *child = layer->firstChild(); child; child = child->nextSibling()) {
-            if (wet)
-                ++stats.wetPoolNodes;
-            else
+            if (kind == Kind::Dry)
                 ++stats.dryNodes;
+            else if (kind == Kind::Recent)
+                ++stats.recentPoolNodes;
+            else
+                ++stats.wetPoolNodes;
             if (child->type() != QSGNode::GeometryNodeType) {
                 ++stats.foreignNodes;
                 continue;
             }
             auto *geometryNode = static_cast<QSGGeometryNode *>(child);
-            // Пустой кусок пула мокрого слоя не рисуется и штрихом не считается.
-            if (wet && geometryNode->geometry()->vertexCount() > 0)
+            // Пустой слот пула не рисуется и штрихом не считается.
+            const bool filled = geometryNode->geometry()->vertexCount() > 0;
+            if (kind == Kind::Recent && filled)
+                ++stats.recentNodes;
+            if (kind == Kind::Wet && filled)
                 ++stats.wetNodes;
             const auto *material = dynamic_cast<const InkMaterial *>(geometryNode->material());
             if (!material || material->layer() != expected
@@ -479,7 +499,7 @@ DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) cons
                 ++stats.foreignNodes;
                 continue;
             }
-            if (!wet) {
+            if (kind == Kind::Dry) {
                 dryTypes.append(material->type());
                 continue;
             }
@@ -490,8 +510,9 @@ DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) cons
             previousWet = material;
         }
     };
-    visit(node->ink.dryInk, InkMaterial::Layer::Dry);
-    visit(node->ink.wetInk, InkMaterial::Layer::Wet);
+    visit(node->ink.dryInk, Kind::Dry);
+    visit(node->ink.recentInk(), Kind::Recent);
+    visit(node->ink.wetInk(), Kind::Wet);
     return stats;
 }
 
@@ -505,7 +526,7 @@ DocumentCanvas::InsertLayering DocumentCanvas::insertLayering(quint64 id) const
         return InsertLayering::Missing;
     if (m_pagesRoot->nextSibling() != m_insertsRoot || m_insertsRoot->nextSibling())
         return InsertLayering::BelowPages;
-    for (const QSGNode *layer : {node->ink.dryInk, node->ink.wetInk}) {
+    for (const QSGNode *layer : {node->ink.dryInk, node->ink.recentInk(), node->ink.wetInk()}) {
         if (layer && layer->parent() != node->clip)
             return InsertLayering::Unclipped;
     }
@@ -1217,20 +1238,27 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         if (node->texture)
             node->texture->setRect(local);
 
-        const AttachInkNode attach = [node](QSGNode *child, bool wet) {
-            node->addToLayer(child, wet ? PageSceneNode::WetInkLayer : PageSceneNode::DryInkLayer);
+        const AttachInkNode attach = [node](QSGNode *child, InkSublayer sublayer) {
+            node->addToLayer(child, sublayer == InkSublayer::Wet      ? PageSceneNode::WetInkLayer
+                                    : sublayer == InkSublayer::Recent ? PageSceneNode::RecentInkLayer
+                                                                      : PageSceneNode::DryInkLayer);
         };
+        ensureInkPools(node->ink, attach);
         if (updateDryInkNodes(node->ink, m_inkGeometry.value(page),
                               inkRebuilds >= kMaxInkRebuildsPerFrame, attach))
             ++inkRebuilds;
         else if (inkRebuilds >= kMaxInkRebuildsPerFrame)
             deferred = true;
         // Мокрый штрих вкладыша рисуется во вкладыше, а не на его странице.
-        updateWetInkNodes(node->ink, m_wet.isActive() && m_wetPage == page && m_wetInsert == 0,
-                          attach);
+        updateWetInkNodes(node->ink, m_wet.isActive() && m_wetPage == page && m_wetInsert == 0);
     }
 
     updateInsertNodes(inkRebuilds, deferred);
+
+    // Перенос недавних штрихов сделан везде, где был нужен; отложенный
+    // бюджетом кадра доедет следующим кадром с тем же флагом.
+    if (!deferred)
+        m_flushRecentRequested = false;
 
     // Что не поместилось в этот кадр, доедет следующим.
     if (deferred)
@@ -1239,79 +1267,120 @@ QSGNode *DocumentCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     return root;
 }
 
+// Пулы недавних штрихов и мокрого штриха появляются вместе с узлом
+// поверхности, в том же кадре, что и остальные его узлы, - не на отрыве и не
+// на касании пером.
+void DocumentCanvas::ensureInkPools(InkLayerNodes &layer, const AttachInkNode &attach)
+{
+    if (!layer.recent) {
+        layer.recent = std::make_unique<InkNodePool>(InkMaterial::Layer::Wet,
+                                                     kRecentBatchKeyBase, kRecentSlots);
+        layer.recentIds.clear();
+        attach(layer.recent->node(), InkSublayer::Recent);
+    }
+    if (!layer.wet) {
+        // Номер куска - ключ батча: куски не сливаются в один батч.
+        layer.wet = std::make_unique<InkNodePool>(InkMaterial::Layer::Wet, 0,
+                                                  kWetPoolInitialChunks);
+        layer.wetUsedChunks = 0;
+        layer.wetSettledCount = 0;
+        attach(layer.wet->node(), InkSublayer::Wet);
+    }
+}
+
+// Штрихи geometry[from..] - в конец сухого слоя: по узлу на штрих, прежние
+// узлы не пересоздаются. Недавние слоты пустеют - их штрихи теперь здесь.
+// Батч-рендер перезальёт слитый батч сухих чернил (узел добавлен под корнем
+// батча) - один кадр, поэтому перенос идёт по простою.
+void DocumentCanvas::appendToDryInk(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry,
+                                    int from, const AttachInkNode &attach)
+{
+    if (!layer.dryInk) {
+        layer.dryInk = new QSGNode;
+        attach(layer.dryInk, InkSublayer::Dry);
+    }
+    for (int index = from; index < geometry.size(); ++index) {
+        const StrokeGeometry &entry = geometry[index];
+        QSGGeometryNode *strokeNode = InkNodePool::makeNode(entry.color, InkMaterial::Layer::Dry);
+        InkNodePool::upload(strokeNode, entry.strip.constData(), int(entry.strip.size()));
+        layer.dryInk->appendChildNode(strokeNode);
+        layer.dryInkIds.append(entry.id);
+    }
+    for (int slot = 0; slot < layer.recentIds.size(); ++slot)
+        layer.recent->clear(slot);
+    layer.recentIds.clear();
+    ++m_dryInkNodeRebuilds;
+}
+
 // Сухие чернила пересобираются только когда состав штрихов на странице
-// изменился: обычная прокрутка и зум их не трогают вовсе.
-// Возвращает true, если пересборка действительно случилась.
+// изменился: обычная прокрутка и зум их не трогают вовсе. Показано -
+// сухой слой и за ним недавние слоты; новые штрихи в конце идут в слоты,
+// перенос слотов в сухой слой - по простою (m_flushRecentRequested) или
+// когда слоты кончились. Любое другое изменение - стирание, отмена,
+// перезагрузка - пересобирает сухой слой и очищает слоты вместе с ним: иначе
+// стёртый штрих остался бы виден или штрих нарисовался бы дважды.
+// Возвращает true, если узлы действительно менялись.
 bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry,
                                        bool budgetExhausted, const AttachInkNode &attach)
 {
-    QList<quint64> ids;
-    ids.reserve(geometry.size());
-    for (const StrokeGeometry &entry : geometry)
-        ids.append(entry.id);
+    const qsizetype dryCount = layer.dryInkIds.size();
+    const qsizetype shownCount = dryCount + layer.recentIds.size();
+    const auto idAt = [&geometry](qsizetype index) { return geometry[index].id; };
+    bool continues = geometry.size() >= shownCount;
+    for (qsizetype index = 0; continues && index < dryCount; ++index)
+        continues = idAt(index) == layer.dryInkIds[index];
+    for (qsizetype index = 0; continues && index < layer.recentIds.size(); ++index)
+        continues = idAt(dryCount + index) == layer.recentIds[index];
 
-    if (ids == layer.dryInkIds)
-        return false;
+    if (continues && geometry.size() == shownCount) {
+        if (!m_flushRecentRequested || !hasRecentInk(layer) || budgetExhausted)
+            return false;
+        appendToDryInk(layer, geometry, int(dryCount), attach);
+        return true;
+    }
     if (budgetExhausted)
         return false;
 
-    // Отрыв пера добавляет в конец один штрих: ему - один новый узел, старые
-    // узлы не пересоздаются. Батч-рендер всё равно перезальёт слитый батч
-    // сухих чернил (узел добавлен под корнем батча), но без пересборки всех
-    // полос страницы на CPU.
-    if (layer.dryInk && ids.size() == layer.dryInkIds.size() + 1
-        && std::equal(layer.dryInkIds.cbegin(), layer.dryInkIds.cend(), ids.cbegin())) {
-        const StrokeGeometry &entry = geometry.last();
-        QSGGeometryNode *strokeNode = makeStripNode(entry.color, InkMaterial::Layer::Dry);
-        uploadStrip(strokeNode, entry.strip.constData(), entry.strip.size());
-        layer.dryInk->appendChildNode(strokeNode);
-        layer.dryInkIds = ids;
-        ++m_dryInkNodeRebuilds;
+    // Новые штрихи в конце: в свободные слоты, узлы не добавляются. Геометрия
+    // прежних штрихов при тех же id та же (кэш дописывается, а не
+    // пересобирается), поэтому трогать показанное незачем.
+    if (continues) {
+        const qsizetype fresh = geometry.size() - shownCount;
+        if (layer.recentIds.size() + fresh <= layer.recent->size()) {
+            for (qsizetype index = shownCount; index < geometry.size(); ++index) {
+                const StrokeGeometry &entry = geometry[index];
+                layer.recent->fill(int(layer.recentIds.size()), entry.strip.constData(),
+                                   int(entry.strip.size()), entry.color);
+                layer.recentIds.append(entry.id);
+            }
+            return true;
+        }
+        // Слоты кончились: всё недавнее и новое - в сухой слой сразу.
+        appendToDryInk(layer, geometry, int(dryCount), attach);
         return true;
     }
 
+    for (int slot = 0; slot < layer.recentIds.size(); ++slot)
+        layer.recent->clear(slot);
+    layer.recentIds.clear();
     if (layer.dryInk) {
         layer.dryInk->parent()->removeChildNode(layer.dryInk);
         delete layer.dryInk;
         layer.dryInk = nullptr;
     }
-
-    layer.dryInkIds = ids;
-    ++m_dryInkNodeRebuilds;
-    if (geometry.isEmpty())
+    layer.dryInkIds.clear();
+    if (geometry.isEmpty()) {
+        ++m_dryInkNodeRebuilds;
         return true;
-
-    layer.dryInk = new QSGNode;
-    attach(layer.dryInk, false);
-    for (const StrokeGeometry &entry : geometry) {
-        QSGGeometryNode *strokeNode = makeStripNode(entry.color, InkMaterial::Layer::Dry);
-        uploadStrip(strokeNode, entry.strip.constData(), entry.strip.size());
-        layer.dryInk->appendChildNode(strokeNode);
     }
+    appendToDryInk(layer, geometry, 0, attach);
     return true;
 }
 
-void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
-                                       const AttachInkNode &attach)
+void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active)
 {
     const QVector<StrokeTessellator::Vertex> &strip = m_wet.strip();
-
-    // Слой и начальный пул появляются вместе с узлом поверхности, в том же
-    // кадре, что и остальные его узлы, - не на касании пером.
-    if (!layer.wetInk) {
-        layer.wetInk = new QSGNode;
-        attach(layer.wetInk, true);
-        layer.wetChunks.clear();
-        layer.wetUsedChunks = 0;
-        layer.wetSettledCount = 0;
-        while (layer.wetChunks.size() < kWetPoolInitialChunks) {
-            // Номер куска - ключ батча: куски не сливаются в один батч.
-            QSGGeometryNode *chunk = makeStripNode(m_penColor, InkMaterial::Layer::Wet,
-                                                   int(layer.wetChunks.size()));
-            layer.wetInk->appendChildNode(chunk);
-            layer.wetChunks.append(chunk);
-        }
-    }
+    InkNodePool &pool = *layer.wet;
 
     const int needed =
         !active || strip.size() < 4
@@ -1324,14 +1393,12 @@ void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
     if (needed > 0 && layer.wetStrokeSerial != m_wetStrokeSerial) {
         layer.wetStrokeSerial = m_wetStrokeSerial;
         layer.wetSettledCount = 0;
-        for (int index = 0; index < layer.wetUsedChunks; ++index)
-            reviveWetChunk(layer.wetChunks[index], m_penColor);
     }
 
     // Куски за концом полосы пустеют, а не удаляются: полоса укорачивается,
     // когда пересобирается провизорный хвост, а после отрыва пустеют все.
     for (int index = needed; index < layer.wetUsedChunks; ++index)
-        clearWetChunk(layer.wetChunks[index]);
+        pool.clear(index);
     if (needed == 0) {
         layer.wetUsedChunks = 0;
         layer.wetSettledCount = 0;
@@ -1340,17 +1407,8 @@ void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
 
     // Пул растёт вдвое: длинный штрих добавляет узлы только при первом
     // переполнении, следующие такие же обходятся без добавления.
-    if (needed > layer.wetChunks.size()) {
-        const int target = qMax(needed, 2 * int(layer.wetChunks.size()));
-        while (layer.wetChunks.size() < target) {
-            QSGGeometryNode *chunk = makeStripNode(m_penColor, InkMaterial::Layer::Wet,
-                                                   int(layer.wetChunks.size()));
-            layer.wetInk->appendChildNode(chunk);
-            layer.wetChunks.append(chunk);
-        }
-    }
-    for (int index = layer.wetUsedChunks; index < needed; ++index)
-        reviveWetChunk(layer.wetChunks[index], m_penColor);
+    if (needed > pool.size())
+        pool.grow(qMax(needed, 2 * pool.size()));
     const int previouslyUsed = layer.wetUsedChunks;
     layer.wetUsedChunks = needed;
 
@@ -1367,7 +1425,7 @@ void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
         // Кусок с номером меньше needed всегда начинается раньше двух последних
         // вершин полосы, так что в нём не меньше трёх вершин - один треугольник.
         const int count = qMin(kWetChunkVertices, int(strip.size()) - start);
-        uploadStrip(layer.wetChunks[index], strip.constData() + start, count);
+        pool.fill(index, strip.constData() + start, count, m_penColor);
     }
     layer.wetSettledCount = m_wet.settledVertexCount();
 }
@@ -1414,19 +1472,26 @@ void DocumentCanvas::updateInsertNodes(int &inkRebuilds, bool &deferred)
         node->setMatrix(matrix);
         node->setFrame(rect.size(), borderWidth);
 
-        const AttachInkNode attach = [node](QSGNode *child, bool wet) {
-            // Сухие чернила - под мокрым штрихом, как на странице.
-            if (!wet && node->ink.wetInk)
-                node->clip->insertChildNodeBefore(child, node->ink.wetInk);
+        const AttachInkNode attach = [node](QSGNode *child, InkSublayer sublayer) {
+            // Под обрезкой тот же порядок, что на странице: сухие, недавние,
+            // мокрый штрих.
+            QSGNode *above = nullptr;
+            if (sublayer == InkSublayer::Dry)
+                above = node->ink.recentInk() ? node->ink.recentInk() : node->ink.wetInk();
+            else if (sublayer == InkSublayer::Recent)
+                above = node->ink.wetInk();
+            if (above && above->parent() == node->clip)
+                node->clip->insertChildNodeBefore(child, above);
             else
                 node->clip->appendChildNode(child);
         };
+        ensureInkPools(node->ink, attach);
         if (updateDryInkNodes(node->ink, m_insertGeometry.value(id),
                               inkRebuilds >= kMaxInkRebuildsPerFrame, attach))
             ++inkRebuilds;
         else if (inkRebuilds >= kMaxInkRebuildsPerFrame)
             deferred = true;
-        updateWetInkNodes(node->ink, m_wet.isActive() && m_wetInsert == id, attach);
+        updateWetInkNodes(node->ink, m_wet.isActive() && m_wetInsert == id);
         alive.insert(id);
     }
 
@@ -1538,6 +1603,9 @@ void DocumentCanvas::setPointerIsEraser(bool eraser)
 bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool eraser,
                                 qreal timeSeconds)
 {
+    // Перо в работе - не простой: перенос недавних штрихов подождёт.
+    if (m_recentFlushTimer.isActive())
+        restartRecentFlush();
     if (!m_ink || m_layout.isEmpty())
         return false;
 
@@ -1600,6 +1668,8 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
 
 void DocumentCanvas::continueInkAt(const QPointF &viewPoint, qreal pressure, qreal timeSeconds)
 {
+    if (m_recentFlushTimer.isActive())
+        restartRecentFlush();
     // Начатый штрих доводится до конца тем же инструментом: нажатие кнопки на
     // корпусе посреди линии не должно превращать её в стирание.
     if (m_placingInsert)
@@ -1639,10 +1709,13 @@ void DocumentCanvas::endInk()
     m_wetOrigin = QPointF();
     m_wet.reset();
 
-    if (m_ink && stroke.isValid())
+    if (m_ink && stroke.isValid()) {
         m_ink->addStroke(stroke); // пометит страницу грязной через pageChanged
-    else
+        // Штрих лёг в недавние слоты; в сухой слой он переедет по простою.
+        restartRecentFlush();
+    } else {
         update();
+    }
 
     emit stylusActiveChanged();
 }

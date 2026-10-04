@@ -15,6 +15,7 @@
 // Программный бэкенд графа сцены (tst_pagescenegraph) батчей не строит,
 // поэтому это проверяется только здесь.
 
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QQuickItem>
 #include <QQuickRenderControl>
@@ -33,6 +34,7 @@
 
 #include "canvas/documentcanvas.h"
 #include "canvas/inkmaterial.h"
+#include "canvas/inknodepool.h"
 #include "fixtures.h"
 #include "ink/inkdocument.h"
 #include "ink/inkcoverage.h"
@@ -265,6 +267,161 @@ struct CanvasScene
     }
 };
 
+// Насколько кадр after темнее кадра before поперёк горизонтальной оси в точке
+// at: максимум по ±4 px.
+int darkeningAcross(const QImage &before, const QImage &after, const QPointF &at)
+{
+    int darkening = 0;
+    const int x = int(at.x());
+    for (int y = int(at.y()) - 4; y <= int(at.y()) + 4; ++y)
+        darkening = qMax(darkening, qRed(before.pixel(x, y)) - qRed(after.pixel(x, y)));
+    return darkening;
+}
+
+// Плотная страница холста: штрихов столько, что вершин больше порога
+// батч-рендера (1024), и узел страницы, который двигается каждый кадр,
+// становится корнем батча - как плотная страница приложения. Мелкое
+// поддерево без своего корня батч-рендер перезаливает на каждом сдвиге
+// целиком, и проверять было бы нечего.
+struct DensePage
+{
+    static constexpr int kDryStrokes = 12;
+
+    explicit DensePage(UploadLog &log)
+        : log(log)
+    {
+    }
+
+    UploadLog &log;
+    CanvasScene fixture;
+    const InkMaterial dryMaterial;
+    const InkMaterial wetMaterial{InkMaterial::Layer::Wet};
+    const QSGMaterialType *dry = dryMaterial.type();
+    // У недавних штрихов и кусков мокрого штриха тип материала общий.
+    const QSGMaterialType *wet = wetMaterial.type();
+    qreal time = 3.0;
+    QString error;
+
+    bool touch(const QPointF &from)
+    {
+        return fixture.canvas->pageAtView(from) == 0
+               && fixture.canvas->beginInkAt(from, 0.6, false, time);
+    }
+
+    void move(const QPointF &from, int first, int last)
+    {
+        for (int i = first; i <= last; ++i) {
+            time += 1.0 / 240.0;
+            fixture.canvas->continueInkAt(from + QPointF(i * 2.0, 0.0), 0.6, time);
+        }
+    }
+
+    // Сухие штрихи в сухом слое, батч сухого слоя виден в журнале - иначе
+    // отсутствие строк ничего не значит, - и покой: растр страницы в полном
+    // разрешении доехал, кадры ничего не заливают. Смена текстуры страницы
+    // перезаливает и чернила под ней (слитый батч текстур соседних страниц
+    // перекрывает их порядки), и это не то, что здесь проверяется.
+    bool prepare()
+    {
+        DocumentCanvas *canvas = fixture.canvas;
+        OffscreenScene &scene = fixture.scene;
+        canvas->setPenWidth(3.0);
+        canvas->goToPage(0);
+        if (!scene.framesUntil([canvas] { return !canvas->textureSizeOf(0).isEmpty(); })) {
+            error = QStringLiteral("страница не отрисовалась");
+            return false;
+        }
+        log.clear();
+        for (int k = 0; k < kDryStrokes; ++k) {
+            const QPointF from(300, 150 + k * 20.0);
+            if (!touch(from)) {
+                error = QStringLiteral("касание мимо страницы");
+                return false;
+            }
+            move(from, 1, 60);
+            canvas->endInk();
+        }
+        canvas->flushRecentInk();
+        if (!scene.framesUntil(
+                [canvas] { return canvas->inkMaterialStats(0).dryNodes == kDryStrokes; })) {
+            error = QStringLiteral("сухой слой не собрался");
+            return false;
+        }
+        scene.frames(3);
+        if (log.uploadedElements(dry) == 0) {
+            error = QStringLiteral("батч сухих чернил в журнале заливки не виден");
+            return false;
+        }
+        // Растр в полном разрешении считается на рабочем потоке и может
+        // прийти позже первого тихого кадра: покой - полсекунды тихих кадров.
+        int quiet = 0;
+        for (int i = 0; i < 600 && quiet < 50; ++i) {
+            QTest::qWait(10);
+            log.clear();
+            scene.frame();
+            quiet = log.uploadedElements() == 0 ? quiet + 1 : 0;
+        }
+        if (quiet >= 50)
+            return true;
+        error = QStringLiteral("кадры не успокоились");
+        return false;
+    }
+};
+
+// Корень с 80 полосами (корень батча после первого сдвига) и пул из одного
+// пустого слота под ним; заливка слота - по флагу, без других изменений.
+class PoolItem : public QQuickItem
+{
+public:
+    static constexpr qreal kSlotAxisY = 150.0;
+
+    PoolItem() { setFlag(ItemHasContents); }
+    bool touchMatrix = false;
+    bool fillSlot = false;
+
+protected:
+    QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override
+    {
+        if (old) {
+            auto *root = static_cast<QSGTransformNode *>(old);
+            if (touchMatrix) {
+                root->setMatrix(QMatrix4x4());
+                touchMatrix = false;
+            }
+            if (fillSlot) {
+                StrokeTessellator tessellator;
+                tessellator.setWidth(4.0);
+                tessellator.setMinWidthFactor(0.0);
+                QList<InkPoint> points;
+                for (int i = 0; i <= 40; ++i)
+                    points.append({QPointF(20 + i * 4.0, kSlotAxisY), 1.0, i / 200.0});
+                const QVector<AxisVertex> strip = tessellator.tessellate(points);
+                m_pool->fill(0, strip.constData(), int(strip.size()), Qt::black);
+                fillSlot = false;
+            }
+            return old;
+        }
+        auto *root = new QSGTransformNode;
+        StrokeTessellator tessellator;
+        tessellator.setWidth(1.0);
+        for (int k = 0; k < kStrokes; ++k) {
+            QList<InkPoint> points;
+            for (int i = 0; i <= 10; ++i)
+                points.append({QPointF(220 + i * 4.0, 10 + k * 2.0), 1.0, i / 200.0});
+            const QVector<AxisVertex> strip = tessellator.tessellate(points);
+            QSGGeometryNode *node = InkNodePool::makeNode(Qt::gray, InkMaterial::Layer::Dry);
+            InkNodePool::upload(node, strip.constData(), int(strip.size()));
+            root->appendChildNode(node);
+        }
+        m_pool = std::make_unique<InkNodePool>(InkMaterial::Layer::Wet, 0, 1);
+        root->appendChildNode(m_pool->node());
+        return root;
+    }
+
+private:
+    std::unique_ptr<InkNodePool> m_pool;
+};
+
 } // namespace
 
 class TestInkMaterialGpu : public QObject
@@ -318,104 +475,143 @@ private slots:
     void wetInkDoesNotReuploadDryBatch()
     {
         UploadLog log;
-        CanvasScene fixture;
-        QVERIFY(fixture.open(fixtures::large()));
-        if (!fixture.scene.initialize())
+        DensePage dense(log);
+        QVERIFY(dense.fixture.open(fixtures::large()));
+        if (!dense.fixture.scene.initialize())
             QSKIP("RHI недоступен на этой платформе (программный бэкенд)");
-        OffscreenScene &scene = fixture.scene;
-        DocumentCanvas *canvas = fixture.canvas;
-
-        const InkMaterial dryMaterial;
-        const InkMaterial wetMaterial(InkMaterial::Layer::Wet);
-        const QSGMaterialType *dry = dryMaterial.type();
-        const QSGMaterialType *wet = wetMaterial.type();
-
-        canvas->setPenWidth(3.0);
-        canvas->goToPage(0);
-        QVERIFY(scene.framesUntil([canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
-
-        qreal time = 3.0;
-        const auto touch = [&](const QPointF &from) {
-            QCOMPARE(canvas->pageAtView(from), 0);
-            QVERIFY(canvas->beginInkAt(from, 0.6, false, time));
-        };
-        const auto move = [&](const QPointF &from, int first, int last) {
-            for (int i = first; i <= last; ++i) {
-                time += 1.0 / 240.0;
-                canvas->continueInkAt(from + QPointF(i * 2.0, 0.0), 0.6, time);
-            }
-        };
-
-        // Сухие чернила: штрихов на странице столько, что вершин в ней больше
-        // порога батч-рендера (1024), и узел страницы, который двигается
-        // каждый кадр, становится корнем батча - как плотная страница
-        // приложения. Мелкое поддерево без своего корня батч-рендер
-        // перезаливает на каждом сдвиге целиком, и проверять было бы нечего.
-        // Батч сухого слоя залит и виден в журнале - иначе отсутствие строк
-        // ничего не значит.
-        constexpr int kDryStrokes = 12;
-        log.clear();
-        for (int k = 0; k < kDryStrokes; ++k) {
-            const QPointF from(300, 150 + k * 20.0);
-            touch(from);
-            move(from, 1, 60);
-            canvas->endInk();
-        }
-        QVERIFY(scene.framesUntil(
-            [canvas] { return canvas->inkMaterialStats(0).dryNodes == kDryStrokes; }));
-        scene.frames(3);
-        QVERIFY2(log.uploadedElements(dry) > 0, "батч сухих чернил в журнале заливки не виден");
-        // Покой: растр страницы в полном разрешении доехал, кадр ничего не
-        // заливает. Смена текстуры страницы перезаливает и чернила под ней
-        // (слитый батч текстур соседних страниц перекрывает их порядки), и
-        // это не то, что здесь проверяется.
-        const auto idle = [&] {
-            for (int i = 0; i < 200; ++i) {
-                QTest::qWait(5);
-                log.clear();
-                scene.frame();
-                if (log.uploadedElements() == 0)
-                    return true;
-            }
-            return false;
-        };
-        QVERIFY(idle());
+        QVERIFY2(dense.prepare(), qPrintable(dense.error));
+        OffscreenScene &scene = dense.fixture.scene;
         const QImage before = scene.frame();
 
         // Касание вторым штрихом: залит кусок мокрого штриха, сухой батч - нет.
-        // Что ожившему пустому куску нужен DirtyMaterial, здесь не ловится:
-        // соседние страницы без своего корня батча двигаются каждый кадр и
-        // сами заказывают перестройку батчей, так что кусок попадает в батч
-        // и без него.
         const QPointF second(300, 450);
         log.clear();
-        touch(second);
-        move(second, 1, 6);
+        QVERIFY(dense.touch(second));
+        dense.move(second, 1, 6);
         scene.frame();
-        QVERIFY2(log.uploadedElements(wet) > 0, "мокрый штрих не залит - он не нарисован");
-        QVERIFY2(log.uploadedElements(dry) == 0,
+        QVERIFY2(log.uploadedElements(dense.wet) > 0, "мокрый штрих не залит - он не нарисован");
+        QVERIFY2(log.uploadedElements(dense.dry) == 0,
                  qPrintable(QStringLiteral("касание перезалило батч сухих чернил: %1 узлов")
-                                .arg(log.uploadedElements(dry))));
+                                .arg(log.uploadedElements(dense.dry))));
 
         // Событие пера на уже занятом куске: только кусок.
         log.clear();
-        move(second, 7, 40);
+        dense.move(second, 7, 40);
         const QImage image = scene.frame();
-        QVERIFY(log.uploadedElements(wet) > 0);
-        QVERIFY2(log.uploadedElements(dry) == 0,
+        QVERIFY(log.uploadedElements(dense.wet) > 0);
+        QVERIFY2(log.uploadedElements(dense.dry) == 0,
                  qPrintable(QStringLiteral("событие пера перезалило батч сухих чернил: %1 узлов")
-                                .arg(log.uploadedElements(dry))));
+                                .arg(log.uploadedElements(dense.dry))));
         // И штрих действительно нарисован: поперёк оси кадр темнее, чем до
-        // касания. Ожившему куску без батча этого не видать.
-        int darkening = 0;
-        const int x = int(second.x()) + 40;
-        for (int y = int(second.y()) - 4; y <= int(second.y()) + 4; ++y)
-            darkening = qMax(darkening, qRed(before.pixel(x, y)) - qRed(image.pixel(x, y)));
+        // касания.
+        const int darkening = darkeningAcross(before, image, second + QPointF(40, 0));
         QVERIFY2(darkening >= 64,
                  qPrintable(QStringLiteral("мокрый штрих не виден: темнее на %1").arg(darkening)));
 
-        canvas->endInk();
+        dense.fixture.canvas->endInk();
         scene.frames(2);
+    }
+
+    // Отрыв пера на плотной странице кладёт штрих в слот недавних штрихов и
+    // сухой батч не перезаливает; перенос в сухой слой - один раз, после
+    // паузы, и картинка при нём не меняется (ink-beauty-pass, рецензия
+    // группы 12: кадр отрыва на странице в 26 МБ - около 12 мс).
+    void liftUsesRecentSlotAndIdleMovesItOnce()
+    {
+        UploadLog log;
+        DensePage dense(log);
+        QVERIFY(dense.fixture.open(fixtures::large()));
+        if (!dense.fixture.scene.initialize())
+            QSKIP("RHI недоступен на этой платформе (программный бэкенд)");
+        QVERIFY2(dense.prepare(), qPrintable(dense.error));
+        OffscreenScene &scene = dense.fixture.scene;
+        DocumentCanvas *canvas = dense.fixture.canvas;
+        const QImage before = scene.frame();
+
+        // Два штриха с отрывом: на отрыве и после - сухой батч не залит.
+        log.clear();
+        for (const qreal y : {450.0, 480.0}) {
+            const QPointF from(300, y);
+            QVERIFY(dense.touch(from));
+            dense.move(from, 1, 40);
+            scene.frame();
+            canvas->endInk();
+            scene.frames(2);
+        }
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 2);
+        QVERIFY2(log.uploadedElements(dense.dry) == 0,
+                 qPrintable(QStringLiteral("отрыв перезалил батч сухих чернил: %1 узлов")
+                                .arg(log.uploadedElements(dense.dry))));
+        QVERIFY(log.uploadedElements(dense.wet) > 0);
+        const QImage recent = scene.frame();
+        QVERIFY(darkeningAcross(before, recent, QPointF(340, 480)) >= 64);
+
+        // Пауза: перенос в сухой слой - ровно в одном кадре.
+        int framesWithDry = 0;
+        QElapsedTimer timer;
+        timer.start();
+        while (canvas->inkMaterialStats(0).recentNodes > 0 && timer.elapsed() < 3000) {
+            QTest::qWait(10);
+            log.clear();
+            scene.frame();
+            framesWithDry += log.uploadedElements(dense.dry) > 0 ? 1 : 0;
+        }
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 0);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, DensePage::kDryStrokes + 2);
+        for (int i = 0; i < 5; ++i) {
+            log.clear();
+            scene.frame();
+            framesWithDry += log.uploadedElements(dense.dry) > 0 ? 1 : 0;
+        }
+        QCOMPARE(framesWithDry, 1);
+
+        // Тот же шейдер, цвет и порядок: картинка та же.
+        const QImage moved = scene.frame();
+        int worst = 0;
+        for (int y = 0; y < moved.height(); ++y) {
+            for (int x = 0; x < moved.width(); ++x) {
+                const QRgb a = recent.pixel(x, y);
+                const QRgb b = moved.pixel(x, y);
+                worst = qMax(worst, qMax(qAbs(qRed(a) - qRed(b)),
+                                         qMax(qAbs(qGreen(a) - qGreen(b)),
+                                              qAbs(qBlue(a) - qBlue(b)))));
+            }
+        }
+        QVERIFY2(worst <= 2,
+                 qPrintable(QStringLiteral("перенос изменил картинку на %1/255").arg(worst)));
+    }
+
+    // Пустой слот пула оживает со штрихом. Пустой элемент батча не имеет, а
+    // одна DirtyGeometry у элемента без батча перестройку батчей не
+    // заказывает: без DirtyMaterial в InkNodePool::fill слот остаётся
+    // невидимым. Корень батча здесь неподвижен, и других движущихся узлов нет
+    // - перестройку не закажет никто другой.
+    void revivedPoolSlotIsDrawn()
+    {
+        const UploadLog quiet;
+        const QSize size(400, 200);
+        OffscreenScene scene(size);
+        auto *item = new PoolItem;
+        item->setParentItem(scene.window().contentItem());
+        item->setSize(QSizeF(size));
+        if (!scene.initialize())
+            QSKIP("RHI недоступен на этой платформе (программный бэкенд)");
+
+        // Первый кадр строит узлы, второй сдвигает корень - он становится
+        // корнем батча, - дальше покой.
+        scene.frame();
+        item->touchMatrix = true;
+        item->update();
+        scene.frames(3);
+        const QImage empty = scene.frame();
+
+        item->fillSlot = true;
+        item->update();
+        const QImage filled = scene.frame();
+        const int darkening =
+            darkeningAcross(empty, filled, QPointF(100, PoolItem::kSlotAxisY));
+        QVERIFY2(darkening >= 128,
+                 qPrintable(QStringLiteral("оживлённый слот не виден: темнее на %1").arg(darkening)));
     }
 };
 

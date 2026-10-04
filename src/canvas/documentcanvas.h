@@ -158,12 +158,15 @@ public:
     // Чем нарисованы чернила страницы (design.md ink-beauty-pass, D7). Узел
     // «чужой», если он не на InkMaterial своего слоя или вершина не AxisVertex.
     // Типы сухого и мокрого слоёв обязаны различаться, а куски мокрого штриха -
-    // не совпадать по compare(), иначе батч-рендер их сольёт. Куски мокрого
-    // слоя - пул, живущий вместе с узлом страницы: wetNodes - куски с
-    // вершинами, wetPoolNodes - все узлы пула.
+    // не совпадать по compare(), иначе батч-рендер их сольёт. Недавние штрихи
+    // и куски мокрого штриха - пулы, живущие вместе с узлом страницы:
+    // recentNodes и wetNodes - слоты с вершинами, *PoolNodes - все узлы пула.
     struct InkMaterialStats
     {
         int dryNodes = 0;
+        // Недавние штрихи: слоты с вершинами и все узлы пула.
+        int recentNodes = 0;
+        int recentPoolNodes = 0;
         int wetNodes = 0;
         int wetPoolNodes = 0;
         int foreignNodes = 0;
@@ -174,6 +177,10 @@ public:
     // Сколько раз узлы сухих чернил пересобирались (страницы и вкладыши). Зум
     // и прокрутка этого числа не меняют.
     int dryInkNodeRebuildCount() const { return m_dryInkNodeRebuilds; }
+    // Перенести недавние штрихи в сухой слой на ближайшем кадре, не дожидаясь
+    // простоя; ждёт ли перенос простоя.
+    void flushRecentInk();
+    bool recentInkFlushScheduled() const { return m_recentFlushTimer.isActive(); }
 
     FrameStats *frameStats() const { return m_frameStats; }
     void setFrameStats(FrameStats *stats);
@@ -456,11 +463,22 @@ private:
 
     // Куда включить узел чернил поверхности: у страницы - на место слоя, у
     // вкладыша - под узел обрезки. Страница и вкладыш заливают чернила одним
-    // кодом (design.md, D4).
-    using AttachInkNode = std::function<void(QSGNode *child, bool wet)>;
+    // кодом (design.md, D4). Порядок снизу вверх: сухие, недавние, мокрый.
+    enum class InkSublayer { Dry, Recent, Wet };
+    using AttachInkNode = std::function<void(QSGNode *child, InkSublayer sublayer)>;
+    void ensureInkPools(InkLayerNodes &layer, const AttachInkNode &attach);
     bool updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry,
                            bool budgetExhausted, const AttachInkNode &attach);
-    void updateWetInkNodes(InkLayerNodes &layer, bool active, const AttachInkNode &attach);
+    void appendToDryInk(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry, int from,
+                        const AttachInkNode &attach);
+    void updateWetInkNodes(InkLayerNodes &layer, bool active);
+
+    // Перенос недавних штрихов в сухой слой - по простою: перо и вид не
+    // двигались kRecentFlushMs. Таймер живёт на потоке UI, флаг читает
+    // updatePaintNode.
+    void restartRecentFlush();
+    QTimer m_recentFlushTimer;
+    bool m_flushRecentRequested = false;
 
     // Вкладыши. Инструмент до «Вкладыша» возвращается после установки.
     Tool m_toolBeforeInsert = Tool::Pen;

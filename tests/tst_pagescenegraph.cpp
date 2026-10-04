@@ -451,6 +451,8 @@ private slots:
         QVERIFY(renderUntil(&fixture.window,
                             [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
         drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        // Законченный штрих - в недавних слотах; в сухой слой его переносит простой.
+        canvas->flushRecentInk();
         renderFrames(&fixture.window, 3);
 
         // Длинный мокрый штрих - больше одного куска по 512 вершин.
@@ -557,6 +559,167 @@ private slots:
         QCOMPARE(canvas->wetInkCoveredVertexCount(0), -1);
     }
 
+    // Отрыв пера кладёт штрих в слот недавних штрихов: узлы не добавляются,
+    // сухой слой не трогается (добавление узла под корнем батча перезалило бы
+    // слитый батч сухих чернил страницы). В сухой слой недавние переезжают
+    // разом, когда перо и вид в покое (ink-beauty-pass, рецензия группы 12).
+    void liftFillsRecentSlotAndIdleMovesItToDry()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        canvas->flushRecentInk();
+        renderFrames(&fixture.window, 3);
+        const DocumentCanvas::InkMaterialStats before = canvas->inkMaterialStats(0);
+        QCOMPARE(before.dryNodes, 1);
+        QCOMPARE(before.recentNodes, 0);
+        QVERIFY(before.recentPoolNodes > 1);
+        const int rebuilds = canvas->dryInkNodeRebuildCount();
+
+        drawLine(canvas, QPointF(350, 340), QPointF(550, 340));
+        renderFrames(&fixture.window, 2);
+        drawLine(canvas, QPointF(350, 380), QPointF(550, 380));
+        renderFrames(&fixture.window, 2);
+        DocumentCanvas::InkMaterialStats lifted = canvas->inkMaterialStats(0);
+        QCOMPARE(lifted.dryNodes, 1);
+        QCOMPARE(lifted.recentNodes, 2);
+        QCOMPARE(lifted.recentPoolNodes, before.recentPoolNodes);
+        QCOMPARE(lifted.wetPoolNodes, before.wetPoolNodes);
+        QCOMPARE(lifted.foreignNodes, 0);
+        QVERIFY(lifted.dryAndWetTypesDiffer);
+        QCOMPARE(canvas->dryInkNodeRebuildCount(), rebuilds);
+        QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::AboveRaster);
+        QVERIFY(canvas->recentInkFlushScheduled());
+
+        // Простой: недавние - в сухом слое, слоты пусты, узлов пула столько же.
+        QVERIFY(renderUntil(&fixture.window, [canvas] {
+            return canvas->inkMaterialStats(0).recentNodes == 0;
+        }, 3000));
+        lifted = canvas->inkMaterialStats(0);
+        QCOMPARE(lifted.dryNodes, 3);
+        QCOMPARE(lifted.recentPoolNodes, before.recentPoolNodes);
+        QCOMPARE(canvas->dryInkNodeRebuildCount(), rebuilds + 1);
+        QVERIFY(!canvas->recentInkFlushScheduled());
+        QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::AboveRaster);
+    }
+
+    // Стирание, отмена и повтор недавнего штриха до переноса: стёртый штрих
+    // исчезает, ни один не рисуется дважды - показано ровно то, что в
+    // геометрии страницы.
+    void recentStrokesFollowEraseUndoAndRedo()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        canvas->flushRecentInk();
+        renderFrames(&fixture.window, 2);
+
+        const auto shown = [canvas] {
+            const DocumentCanvas::InkMaterialStats stats = canvas->inkMaterialStats(0);
+            return stats.dryNodes + stats.recentNodes;
+        };
+        drawLine(canvas, QPointF(350, 340), QPointF(550, 340));
+        renderFrames(&fixture.window, 1);
+        drawLine(canvas, QPointF(350, 380), QPointF(550, 380));
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 2);
+        QCOMPARE(shown(), 3);
+
+        // Ластик по недавнему штриху.
+        canvas->setTool(DocumentCanvas::Tool::Eraser);
+        drawLine(canvas, QPointF(450, 330), QPointF(450, 350));
+        canvas->setTool(DocumentCanvas::Tool::Pen);
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(fixture.ink.strokeCount(), 2);
+        QCOMPARE(canvas->inkGeometryStrokeCount(0), 2);
+        QCOMPARE(shown(), 2);
+
+        // Отмена стирания возвращает штрих, отмена его - снова убирает.
+        fixture.ink.undo();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(shown(), 3);
+        drawLine(canvas, QPointF(350, 420), QPointF(550, 420));
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(shown(), 4);
+        fixture.ink.undo();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkGeometryStrokeCount(0), 3);
+        QCOMPARE(shown(), 3);
+        fixture.ink.redo();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(shown(), 4);
+        QVERIFY(canvas->inkMaterialStats(0).recentNodes > 0);
+
+        // Перенос по простою после всего этого - то же число штрихов.
+        canvas->flushRecentInk();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 0);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 4);
+        QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::AboveRaster);
+    }
+
+    // Отмена единственного штриха страницы, пока он в недавних слотах:
+    // страница пуста, слот тоже - сухого слоя, вместе с которым он чистился
+    // бы, здесь нет вовсе.
+    void undoOfOnlyRecentStrokeLeavesPageEmpty()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 0);
+
+        fixture.ink.undo();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkGeometryStrokeCount(0), 0);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 0);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 0);
+        QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::Incomplete);
+    }
+
+    // Слотов не хватило - всё недавнее переезжает в сухой слой сразу, ни один
+    // штрих не теряется и не двоится.
+    void recentOverflowMovesToDryAtOnce()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        renderFrames(&fixture.window, 1);
+        const int poolSize = canvas->inkMaterialStats(0).recentPoolNodes;
+        QVERIFY(poolSize > 0);
+        for (int i = 0; i <= poolSize; ++i) {
+            const qreal y = 120 + i * 6.0;
+            drawLine(canvas, QPointF(300, y), QPointF(500, y));
+            renderFrames(&fixture.window, 1);
+            const DocumentCanvas::InkMaterialStats stats = canvas->inkMaterialStats(0);
+            QCOMPARE(stats.dryNodes + stats.recentNodes, i + 1);
+            QCOMPARE(stats.recentPoolNodes, poolSize);
+        }
+        const DocumentCanvas::InkMaterialStats stats = canvas->inkMaterialStats(0);
+        QCOMPARE(stats.dryNodes, poolSize + 1);
+        QCOMPARE(stats.recentNodes, 0);
+    }
+
     // Сценарий «Изменение масштаба» (ink-input, «Сглаживание кромки чернил»):
     // кромка пересчитывается в шейдере, геометрия штрихов не пересобирается.
     void zoomDoesNotRebuildInkGeometry()
@@ -569,6 +732,8 @@ private slots:
         QVERIFY(renderUntil(&fixture.window,
                             [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
         drawLine(canvas, QPointF(350, 300), QPointF(550, 320));
+        // Законченный штрих - в недавних слотах; в сухой слой его переносит простой.
+        canvas->flushRecentInk();
         renderFrames(&fixture.window, 3);
         QVERIFY(canvas->inkMaterialStats(0).dryNodes > 0);
 

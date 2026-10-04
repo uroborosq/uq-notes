@@ -17,6 +17,8 @@ qt_add_qml_module(uqnotes_core
         canvas/insertlistmodel.h
         canvas/inkmaterial.cpp
         canvas/inkmaterial.h
+        canvas/inknodepool.cpp
+        canvas/inknodepool.h
         ink/inkdocument.cpp
         ink/inkdocument.h
         ink/inkcoverage.h
