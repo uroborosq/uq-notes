@@ -6847,6 +6847,12 @@ provisional))`: к точке дописывается та же пиковая 
 
 # Шаг 3: материал чернил
 
+> **Изменение при исполнении (design.md D7):** предел внутреннего выноса по
+> радиусу кривизны отменён после группы 10 - он вырезал пиксели внутри чернил
+> на арках «m» и «n». Всё во вводной и в группах 10-14 про `|n| = 1 + ρ`,
+> `kRadiusTag`, `curvatureRadius` и предел по ρ в приложение не входит;
+> вариант стенда `aa-fringe-rho` и `gate-rho.sh` остаются для повторного замера.
+
 Исходное состояние: шаги 0-2 выполнены. Стенд в `tools/stroke-lab`, собирается при
 `-DUQ_BUILD_STROKE_LAB=ON`; `StrokeStyle` и `StrokeTessellator::setStyle`; `CapEnd`,
 `emitCap(..., CapEnd)` с парами K = 8, `capDirection`, `isDot` и `WetStroke::withDotTwin`;
