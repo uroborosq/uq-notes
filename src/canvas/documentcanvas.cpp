@@ -82,6 +82,10 @@ struct InkLayerNodes
     // Сухие чернила: узел на штрих, чтобы у каждого был свой цвет.
     QSGNode *dryInk = nullptr;
     QList<quint64> dryInkIds;
+    // Первая сборка чернил узла прошла. Она идёт сразу в сухой слой: штрихи
+    // открытой заметки или страницы, вернувшейся в зону удержания, - не
+    // недавние, и в слотах (по батчу на слот) им не место.
+    bool built = false;
 
     // Недавние штрихи: законченные после последнего простоя. Отрыв пера
     // кладёт новый штрих в свободный слот пула, а не узлом в сухой слой:
@@ -1323,6 +1327,12 @@ void DocumentCanvas::appendToDryInk(InkLayerNodes &layer, const QList<StrokeGeom
 bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeGeometry> &geometry,
                                        bool budgetExhausted, const AttachInkNode &attach)
 {
+    // Пустой поверхности собирать нечего: первая сборка - и есть пустота, и
+    // бюджет кадра на неё не тратится.
+    if (!layer.built && geometry.isEmpty() && !layer.dryInk && layer.recentIds.isEmpty()) {
+        layer.built = true;
+        return false;
+    }
     const qsizetype dryCount = layer.dryInkIds.size();
     const qsizetype shownCount = dryCount + layer.recentIds.size();
     const auto idAt = [&geometry](qsizetype index) { return geometry[index].id; };
@@ -1332,7 +1342,7 @@ bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeG
     for (qsizetype index = 0; continues && index < layer.recentIds.size(); ++index)
         continues = idAt(dryCount + index) == layer.recentIds[index];
 
-    if (continues && geometry.size() == shownCount) {
+    if (continues && geometry.size() == shownCount && layer.built) {
         if (!m_flushRecentRequested || !hasRecentInk(layer) || budgetExhausted)
             return false;
         appendToDryInk(layer, geometry, int(dryCount), attach);
@@ -1344,7 +1354,7 @@ bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeG
     // Новые штрихи в конце: в свободные слоты, узлы не добавляются. Геометрия
     // прежних штрихов при тех же id та же (кэш дописывается, а не
     // пересобирается), поэтому трогать показанное незачем.
-    if (continues) {
+    if (continues && layer.built) {
         const qsizetype fresh = geometry.size() - shownCount;
         if (layer.recentIds.size() + fresh <= layer.recent->size()) {
             for (qsizetype index = shownCount; index < geometry.size(); ++index) {
@@ -1353,6 +1363,16 @@ bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeG
                                    int(entry.strip.size()), entry.color);
                 layer.recentIds.append(entry.id);
             }
+            // Слоты наполнил не только отрыв пера (он сам взводит перенос), но
+            // и повтор или отмена стирания: перенос по простою - и для них.
+            // Таймер живёт на потоке UI, а здесь - синхронизация с рендером.
+            QMetaObject::invokeMethod(
+                this,
+                [this] {
+                    if (!m_recentFlushTimer.isActive())
+                        restartRecentFlush();
+                },
+                Qt::QueuedConnection);
             return true;
         }
         // Слоты кончились: всё недавнее и новое - в сухой слой сразу.
@@ -1360,6 +1380,7 @@ bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeG
         return true;
     }
 
+    layer.built = true;
     for (int slot = 0; slot < layer.recentIds.size(); ++slot)
         layer.recent->clear(slot);
     layer.recentIds.clear();

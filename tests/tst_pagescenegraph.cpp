@@ -693,6 +693,53 @@ private slots:
         QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::Incomplete);
     }
 
+    // Первая сборка чернил узла страницы - сразу в сухой слой: штрихи
+    // страницы, вернувшейся в зону удержания, не недавние. Повтор кладёт штрих
+    // в слот вне отрыва пера - и перенос по простою взводится и для него.
+    void returningPageBuildsStraightIntoDry()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        for (int i = 0; i < 3; ++i) {
+            drawLine(canvas, QPointF(350, 300 + i * 40), QPointF(550, 300 + i * 40));
+            renderFrames(&fixture.window, 1);
+        }
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 3);
+
+        canvas->goToPage(kFarPage);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return canvas->pendingNodeRemovalCount() == 0; }));
+        QCOMPARE(canvas->inkLayering(0), DocumentCanvas::InkLayering::Incomplete);
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window, [canvas] {
+            return canvas->inkLayering(0) != DocumentCanvas::InkLayering::Incomplete;
+        }));
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 0);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 3);
+
+        // Отмена и повтор: повторённый штрих - в слоте, перенос взведён. Сначала
+        // - покой, чтобы таймер от письма и движения вида уже отработал.
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->recentInkFlushScheduled(); }, 3000));
+        fixture.ink.undo();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 2);
+        fixture.ink.redo();
+        renderFrames(&fixture.window, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).recentNodes, 1);
+        QCoreApplication::processEvents(); // взвод таймера - queued с синхронизации
+        QVERIFY(canvas->recentInkFlushScheduled());
+        QVERIFY(renderUntil(&fixture.window, [canvas] {
+            return canvas->inkMaterialStats(0).recentNodes == 0;
+        }, 3000));
+        QCOMPARE(canvas->inkMaterialStats(0).dryNodes, 3);
+    }
+
     // Слотов не хватило - всё недавнее переезжает в сухой слой сразу, ни один
     // штрих не теряется и не двоится.
     void recentOverflowMovesToDryAtOnce()
