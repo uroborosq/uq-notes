@@ -8,6 +8,10 @@
 // Под QT_QPA_PLATFORM=offscreen RHI обычно нет (программный бэкенд) - тогда
 // SKIP. Проверка на GPU: QT_QPA_PLATFORM=wayland ./tst_inkmaterialgpu.
 //
+// Там же - цветные чернила на тёмном фоне: каждый канал поперёк штриха -
+// смешивание over премультиплицированного цвета (ink-input, «Цветные чернила
+// на тёмной странице»).
+//
 // Второй тест - батчинг на настоящем RHI с холстом приложения: журнал
 // заливки батч-рендера (QSG_RENDERER_DEBUG=upload) перехватывается, и
 // проверяется, что событие пера и касание новым штрихом не перезаливают
@@ -23,6 +27,8 @@
 #include <QQuickWindow>
 #include <QRegularExpression>
 #include <QSGGeometryNode>
+#include <QSGOpacityNode>
+#include <QSGSimpleRectNode>
 #include <QSGTransformNode>
 #include <QTest>
 
@@ -181,6 +187,80 @@ private:
     std::unique_ptr<QRhiTextureRenderTarget> m_target;
     std::unique_ptr<QRhiRenderPassDescriptor> m_pass;
 };
+
+// Цветные штрихи поверх тёмного прямоугольника (ink-input, «Цветные чернила
+// на тёмной странице»): красный и зелёный полной непрозрачности и красный под
+// узлом непрозрачности 0.5 - по горизонтальному штриху на каждый.
+class DarkPageItem : public QQuickItem
+{
+public:
+    static constexpr QRgb kBackground = 0xff101010;
+    static constexpr qreal kHalfWidth = 2.0;
+
+    struct Stroke
+    {
+        qreal axisY;
+        QColor color;
+        qreal opacity;
+    };
+    static constexpr int kStrokeCount = 3;
+    static Stroke stroke(int i)
+    {
+        const Stroke strokes[kStrokeCount] = {{50.3, QColor(Qt::red), 1.0},
+                                              {100.6, QColor(Qt::green), 1.0},
+                                              {150.3, QColor(Qt::red), 0.5}};
+        return strokes[i];
+    }
+
+    DarkPageItem() { setFlag(ItemHasContents); }
+
+protected:
+    QSGNode *updatePaintNode(QSGNode *old, UpdatePaintNodeData *) override
+    {
+        if (old)
+            return old;
+        auto *root = new QSGNode;
+        root->appendChildNode(new QSGSimpleRectNode(boundingRect(), QColor(kBackground)));
+        StrokeTessellator tessellator;
+        tessellator.setWidth(2.0 * kHalfWidth);
+        tessellator.setMinWidthFactor(0.0);
+        for (int k = 0; k < kStrokeCount; ++k) {
+            const Stroke s = stroke(k);
+            QList<InkPoint> points;
+            for (int i = 0; i <= 40; ++i)
+                points.append({QPointF(20 + i * 4.0, s.axisY), 1.0, i / 200.0});
+            const QVector<AxisVertex> strip = tessellator.tessellate(points);
+            QSGGeometryNode *node = InkNodePool::makeNode(s.color, InkMaterial::Layer::Dry);
+            InkNodePool::upload(node, strip.constData(), int(strip.size()));
+            if (s.opacity < 1.0) {
+                auto *opacity = new QSGOpacityNode;
+                opacity->setOpacity(s.opacity);
+                opacity->appendChildNode(node);
+                root->appendChildNode(opacity);
+            } else {
+                root->appendChildNode(node);
+            }
+        }
+        return root;
+    }
+};
+
+// Относительная яркость sRGB (WCAG 2.x) и контраст двух цветов.
+qreal relativeLuminance(QRgb c)
+{
+    const auto linear = [](int v) {
+        const qreal x = v / 255.0;
+        return x <= 0.04045 ? x / 12.92 : std::pow((x + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(qRed(c)) + 0.7152 * linear(qGreen(c)) + 0.0722 * linear(qBlue(c));
+}
+
+qreal contrast(QRgb a, QRgb b)
+{
+    const qreal la = relativeLuminance(a);
+    const qreal lb = relativeLuminance(b);
+    return (qMax(la, lb) + 0.05) / (qMin(la, lb) + 0.05);
+}
 
 // Журнал заливки батчей (QSG_RENDERER_DEBUG=upload, включается в main до
 // создания приложения). Пока объект жив, отладочные сообщения рендера
@@ -466,6 +546,68 @@ private slots:
                                     .arg(worst)
                                     .arg(massGpu)
                                     .arg(massMirror)));
+        }
+    }
+
+    // Красные и зелёные чернила на тёмной странице - своего цвета. Каждый
+    // канал каждого пикселя поперёк штриха - смешивание over
+    // премультиплицированного цвета с покрытием зеркала: c·a·cov + bg·(1 -
+    // a·cov). Смешивание Min/Max или непремультиплицированный цвет дали бы
+    // другое: Max на кромке красного - зелёный и синий канал фона целиком
+    // вместо половины, Min - чернила, погасшие до фона.
+    void coloredInkKeepsItsColorOnDarkPage()
+    {
+        const UploadLog quiet;
+        const QSize size(200, 200);
+        OffscreenScene scene(size);
+        auto *item = new DarkPageItem;
+        item->setParentItem(scene.window().contentItem());
+        item->setSize(QSizeF(size));
+        if (!scene.initialize())
+            QSKIP("RHI недоступен на этой платформе (программный бэкенд)");
+
+        const QImage image = scene.frame();
+        const QRgb background = DarkPageItem::kBackground;
+        QCOMPARE(image.pixel(100, 10), background);
+        const int x = 100;
+        for (int k = 0; k < DarkPageItem::kStrokeCount; ++k) {
+            const DarkPageItem::Stroke stroke = DarkPageItem::stroke(k);
+            const qreal hw = DarkPageItem::kHalfWidth;
+            int worst = 0;
+            for (int y = int(stroke.axisY - hw - 2); y <= int(stroke.axisY + hw + 2); ++y) {
+                const qreal alpha =
+                    stroke.opacity * ink::coverage(y + 0.5 - stroke.axisY, hw);
+                const auto expected = [alpha](qreal ink, int bg) {
+                    return int(std::lround((ink * alpha + bg / 255.0 * (1.0 - alpha)) * 255.0));
+                };
+                const QRgb got = image.pixel(x, y);
+                worst = qMax(worst, qAbs(qRed(got) - expected(stroke.color.redF(), qRed(background))));
+                worst = qMax(worst,
+                             qAbs(qGreen(got) - expected(stroke.color.greenF(), qGreen(background))));
+                worst = qMax(worst,
+                             qAbs(qBlue(got) - expected(stroke.color.blueF(), qBlue(background))));
+            }
+            QVERIFY2(worst <= 3,
+                     qPrintable(QStringLiteral("штрих %1 (%2, непрозрачность %3): канал разошёлся "
+                                               "со смешиванием over на %4/255")
+                                    .arg(k)
+                                    .arg(stroke.color.name())
+                                    .arg(stroke.opacity)
+                                    .arg(worst)));
+
+            // Середина штриха - свой цвет: свой канал много больше прочих и
+            // контраст с фоном ясно больше единицы.
+            const QRgb center = image.pixel(x, int(stroke.axisY));
+            const int own = stroke.color.red() > 0 ? qRed(center) : qGreen(center);
+            const int other = stroke.color.red() > 0 ? qMax(qGreen(center), qBlue(center))
+                                                     : qMax(qRed(center), qBlue(center));
+            QVERIFY2(own >= 4 * other && contrast(center, background) > 1.5,
+                     qPrintable(QStringLiteral("штрих %1: середина %2, контраст с фоном %3")
+                                    .arg(k)
+                                    .arg(QColor(center).name())
+                                    .arg(contrast(center, background))));
+            if (stroke.opacity == 1.0)
+                QVERIFY(contrast(center, background) > 4.0);
         }
     }
 
