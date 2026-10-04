@@ -640,6 +640,8 @@ private slots:
                       QStringLiteral("1"), QStringLiteral("-r"), QStringLiteral("144"),
                       QStringLiteral("-png"), output, png});
         QVERIFY(render.waitForFinished(60000));
+        QVERIFY2(render.exitStatus() == QProcess::NormalExit && render.exitCode() == 0,
+                 render.readAllStandardError().constData());
         const QFileInfo root(png);
         const QStringList produced =
             QDir(root.absolutePath())
@@ -703,6 +705,34 @@ private slots:
         QVERIFY2(mismatches == 0, qPrintable(QStringLiteral("%1 расхождений, первое %2")
                                                  .arg(mismatches)
                                                  .arg(first)));
+
+        // Кромка: средняя абсолютная ошибка покрытия по области чернил -
+        // пикселям, где покрытие есть у полосы или у PDF. Покрытие PDF - по
+        // зелёному каналу: у бумаги 255, у чернил 20. Пиксели темнее чернил по
+        // красному - текст страницы, они не в счёт. Сдвиг или масштаб
+        // экспорта на полпикселя поднимает ошибку выше порога; сглаживание
+        // poppler и полосы на одной кромке расходится меньше.
+        double errorSum = 0.0;
+        int edgeArea = 0;
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            for (int x = area.left(); x <= area.right(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                const double pdf = std::clamp((255.0 - pixel.green()) / 235.0, 0.0, 1.0);
+                if (std::abs(pixel.red() - (255.0 - 35.0 * pdf)) > 12.0)
+                    continue;
+                const double screen = strip.at(x, y);
+                if (pdf < 0.01 && screen < 0.01)
+                    continue;
+                errorSum += std::abs(pdf - screen);
+                ++edgeArea;
+            }
+        }
+        QVERIFY(edgeArea > 0);
+        const double meanError = errorSum / edgeArea;
+        QVERIFY2(meanError < 0.03,
+                 qPrintable(QStringLiteral("средняя ошибка покрытия %1 на %2 пикселях")
+                                .arg(meanError)
+                                .arg(edgeArea)));
     }
 
 private:

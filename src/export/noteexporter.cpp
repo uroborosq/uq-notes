@@ -214,8 +214,10 @@ bool NoteExporter::exportNow(const QString &sourcePdf, const QList<QSizeF> &disp
                     // Контур - те же примитивы, что полоса на экране: дуги
                     // торцов, стороны, внешние дуги стыков (design.md
                     // ink-beauty-pass, D7); паритет держат tst_inkparity и
-                    // tst_export. Заливка по ненулевому обходу: на петлях и
-                    // резких стыках контур сам себя перекрывает, и even-odd
+                    // tst_export. Отличие одно: внутренняя сторона острого
+                    // стыка идёт через центр стыка, а у полосы там вершина
+                    // на биссектрисе. Заливка по ненулевому обходу: на петлях
+                    // и резких стыках контур сам себя перекрывает, и even-odd
                     // оставил бы дырки.
                     path.setFillRule(Qt::WindingFill);
                     painter.fillPath(path, record->stroke.color);
