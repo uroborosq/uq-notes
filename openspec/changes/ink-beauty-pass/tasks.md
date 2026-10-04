@@ -8432,7 +8432,7 @@ cmake --build build -j$(nproc) --target tst_stroketessellator
 (`uploadStrip` читает `.x/.y`, мост - 11.9); `wetstroke.cpp` собирается - у `emitJoint`
 радиус по умолчанию. Прогон теста - в 11.10.
 
-- [x] 11.7 **`src/ink/wetstroke.cpp`: радиус кривизны в стыках мокрой полосы**
+- [x] 11.7 **`src/ink/wetstroke.cpp`: радиус кривизны в стыках мокрой полосы** (не применимо: предела по ρ нет, design.md D7)
 
 В `rebuildTail()` (после шага 2) цикл окончательных стыков
 `for (int i = m_jointedPoints; i + 1 < points.size(); ++i) { m_tessellator.emitJoint(...); }`

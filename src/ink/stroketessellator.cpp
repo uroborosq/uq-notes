@@ -343,8 +343,17 @@ QPolygonF StrokeTessellator::outline(const QList<InkPoint> &points) const
 
     // Точки контура лежат там, где у полосы на экране проходит кромка |d| = hw:
     // - вершина дуги (торец, внешняя сторона резкого стыка) - на полуширине;
-    // - вершина на биссектрисе и внутренняя вершина резкого стыка - на
-    //   пересечении кромок соседних сегментов, hw / cos(θ/2).
+    // - вершина на биссектрисе пологого стыка - на пересечении кромок
+    //   соседних сегментов, hw / cos(θ/2).
+    // Внутренняя сторона резкого стыка идёт через опорную точку - центр
+    // стыка: c + n₋·hw, c, c + n₊·hw (n₋, n₊ - нормали сегментов внутрь
+    // поворота). Точка пересечения кромок отстоит от стыка на hw·tan(θ/2)
+    // вдоль каждого сегмента - на остром стыке это длиннее соседних отрезков
+    // настоящего штриха, сторона контура шла бы назад, и петля обратного
+    // обхода осталась бы незалитой щелью внутри острия. Через опорную точку
+    // сторона на каждом сегменте идёт только вперёд, а петли у стыка
+    // обходятся в ту же сторону, что весь контур, и заливаются. Где сегменты
+    // длинные, заливка та же: угол кромок, как у полосы.
     QPolygonF left;
     QPolygonF right;
     for (int i = 1; i + 1 < axis.positions.size(); ++i) {
@@ -354,9 +363,9 @@ QPolygonF StrokeTessellator::outline(const QList<InkPoint> &points) const
         const QPointF &outgoing = axis.directions[i];
         const qreal turn = turnAngle(incoming, outgoing);
         const bool turnsLeft = turn > 0.0;
-        const qreal miter = hw / std::max(std::cos(turn / 2.0), 1e-6);
 
         if (std::abs(turn) < kRoundJoinThreshold) {
+            const qreal miter = hw / std::cos(turn / 2.0);
             QPointF bisector = normalized(normalOf(incoming) + normalOf(outgoing));
             if (bisector.isNull())
                 bisector = normalOf(outgoing);
@@ -365,16 +374,16 @@ QPolygonF StrokeTessellator::outline(const QList<InkPoint> &points) const
             continue;
         }
 
-        const QPointF normalSum = normalOf(incoming) + normalOf(outgoing);
-        const bool innerDegenerate = std::hypot(normalSum.x(), normalSum.y()) < kBisectorEpsilon;
-        const QPointF innerDirection = normalized(normalSum) * (turnsLeft ? 1.0 : -1.0);
-        const QPointF inner = innerDegenerate ? c : c + innerDirection * miter;
         const QPointF startNormal = normalOf(incoming) * (turnsLeft ? -1.0 : 1.0);
         const QPointF endNormal = normalOf(outgoing) * (turnsLeft ? -1.0 : 1.0);
         const qreal arcAngle = turnAngle(startNormal, endNormal);
         const int steps = qMax(1, int(std::ceil(std::abs(arcAngle) / kRoundJoinStep)));
 
-        (turnsLeft ? left : right).append(inner);
+        // Внутрь поворота смотрят нормали, обратные внешним.
+        QPolygonF &innerSide = turnsLeft ? left : right;
+        innerSide.append(c - startNormal * hw);
+        innerSide.append(c);
+        innerSide.append(c - endNormal * hw);
         QPolygonF &outerSide = turnsLeft ? right : left;
         for (int step = 0; step <= steps; ++step)
             outerSide.append(c + rotated(startNormal, arcAngle * (qreal(step) / steps)) * hw);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QPointF>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +33,9 @@ struct DeviceVertex
 inline DeviceVertex toDevice(const AxisVertex &v, qreal pxPerUnit,
                              qreal minHalfWidthPx = kDefaultMinHalfWidthPx)
 {
+    // Вынос задан в device px, а вершина - в точках страницы: без масштаба
+    // перевести нечем.
+    Q_ASSERT(pxPerUnit > 0.0);
     const qreal hwPx = std::max(qreal(v.hw) * pxPerUnit, minHalfWidthPx);
     const qreal extensionPx = hwPx + kFringePx;
     return {v.at(extensionPx / pxPerUnit), qreal(v.s) * extensionPx, hwPx};
