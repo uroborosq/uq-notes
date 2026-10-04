@@ -11049,7 +11049,7 @@ EOF
 - Modify: `PERFORMANCE.md`, `README.md`
 - Modify: `CMakeLists.txt:2`, `packaging/PKGBUILD` (версия 0.11.0)
 
-- [ ] 15.1 **Написать падающий тест выбора числа сэмплов**
+- [x] 15.1 **Написать падающий тест выбора числа сэмплов**
 
 Создать `tests/tst_surfaceformat.cpp`:
 
@@ -11116,12 +11116,12 @@ QTEST_GUILESS_MAIN(TestSurfaceFormat)
 uq_add_test(tst_surfaceformat tst_surfaceformat.cpp)
 ```
 
-- [ ] 15.2 **Убедиться, что тест не собирается**
+- [x] 15.2 **Убедиться, что тест не собирается**
 
 Run: `cmake --build build -j$(nproc) --target tst_surfaceformat`
 Expected: ошибка компиляции `canvas/surfaceformat.h: No such file or directory`.
 
-- [ ] 15.3 **Написать функцию выбора числа сэмплов**
+- [x] 15.3 **Написать функцию выбора числа сэмплов**
 
 Создать `src/canvas/surfaceformat.h`:
 
@@ -11176,12 +11176,16 @@ int surfaceSampleCount(const QByteArray &environmentValue)
         canvas/surfaceformat.h
 ```
 
-- [ ] 15.4 **Прогнать тест**
+- [x] 15.4 **Прогнать тест**
 
 Run: `cmake --build build -j$(nproc) --target tst_surfaceformat && ctest --test-dir build -R tst_surfaceformat --output-on-failure`
 Expected: `100% tests passed`.
 
-- [ ] 15.5 **Подключить функцию в main.cpp, пока со значением по умолчанию 4**
+- [x] 15.5 **Подключить функцию в main.cpp, пока со значением по умолчанию 4**
+
+> Выполнено. С временным значением по умолчанию 4 падает не только
+> `defaultIsNoMultisampling`, но и все строки `invalidValueFallsBackToDefault`: они
+> тоже сравнивают с 0. После 15.9 проходят все.
 
 Аудит в 15.7 сравнивает оба режима одной сборкой, поэтому сначала значение по
 умолчанию временно остаётся прежним. В `src/canvas/surfaceformat.cpp` заменить
@@ -11213,12 +11217,23 @@ Expected: `100% tests passed`.
 Run: `cmake --build build -j$(nproc) && ctest --test-dir build -E "tst_surfaceformat|tst_idleframes" --output-on-failure`
 Expected: `100% tests passed`.
 
-- [ ] 15.6 **Собрать сборку для аудита**
+- [x] 15.6 **Собрать сборку для аудита**
+
+> `UQ_DIAGNOSTICS` в `build/` уже был `ON`, отдельная пересборка не понадобилась.
 
 Run: `cmake -S . -B build -DUQ_DIAGNOSTICS=ON && cmake --build build -j$(nproc)`
 Expected: сборка без ошибок.
 
-- [ ] 15.7 **Аудит элементов окна без MSAA (на устройстве)**
+- [x] 15.7 **Аудит элементов окна без MSAA (на устройстве)**
+
+> Выполнено как прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц), не на устройстве: заметка к копии `textbook.pdf` с
+> раскрытым и свёрнутым вкладышем (созданы прямо в `.uqn`, SQLite) и чернилами
+> сценарного письма, зум 1.37; снимки при dpr 1.25 и при dpr 1.75
+> (`QT_SCALE_FACTOR=1.4`, как на устройстве). Итог: рамка вкладыша без MSAA неровная
+> (1 и 2 device px на разных сторонах при одних и тех же зумах) - нужна 15.8;
+> скруглённые элементы, текст и чернила - без лестниц, разница в пределах шума.
+> Подробности - PERFORMANCE.md, раздел «MSAA». Полоса экспорта на снимок не
+> попала (видна только во время экспорта).
 
 Нужен PDF с оглавлением и заметка с раскрытым и свёрнутым вкладышем и чернилами
 (подойдёт `build/tests/fixtures/textbook.pdf`, вкладыш создаётся инструментом
@@ -11242,7 +11257,10 @@ UQ_MSAA=0 UQ_SCREENSHOT=/tmp/uq-msaa0.png UQ_SCREENSHOT_DELAY_MS=1500 ./build/sr
 
 Результат записать в `PERFORMANCE.md` (раздел «MSAA», 15.10).
 
-- [ ] 15.8 **Если по пункту 1 аудита рамка вкладыша неровная - выровнять её по device px**
+- [x] 15.8 **Если по пункту 1 аудита рамка вкладыша неровная - выровнять её по device px**
+
+> Выполнено. Прогон зумов 0.83-2.3 после правки: все стороны рамки 1 device px при
+> dpr 1.25 и 2 device px при dpr 1.75 (до правки - 1 и 2 вперемешку).
 
 Делать только при неровной рамке на снимке `uq-msaa0.png`. Метод `updateInsertNodes`
 и `m_zoom` уже есть, `window()->effectiveDevicePixelRatio()` - метод
@@ -11268,6 +11286,18 @@ Expected: `100% tests passed`. Повторить снимок `uq-msaa0.png` и
 
 - [ ] 15.9 **Замер GPU и переключение значения по умолчанию**
 
+> Сделан прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц): `intel_gpu_top` там нет, вместо RCS - время кадра на GPU по
+> меткам QRhi (`QSG_RHI_PROFILE=1 QSG_RENDER_TIMING=1`), по два прогона на режим,
+> чередуя. 200 страниц: медиана GPU 0.58 → 0.35 мс, p99 0.87 → 0.63 мс; плотная
+> страница: p99 GPU 3.66-3.69 → 1.27-1.28 мс; p99 интервала кадров в пределах
+> разброса (17.84-17.92 против 17.90-17.95 мс, плотная 17.66-17.99 против 17.85).
+> Прокси-гейт пройден, значение по умолчанию переключено на 0; ctest 26/26,
+> включая `defaultIsNoMultisampling`. `aa-gpu-bench` (масштаб 1 / 2.3): 1.88 /
+> 1.51-2.56 мс у MSAA 4x с плоской заливкой против 1.76 / 0.92-1.42 мс у InkMaterial
+> без MSAA.
+> Не выполнено: нужен Galaxy Book (120 Гц, KWin, `intel_gpu_top`, `kb.pdf`) - гейт
+> по RCS и p99 интервала там, командами ниже; при провале - ветка «гейт не пройден».
+
 На устройстве, документ на 200 страниц с чернилами (как в `PERFORMANCE.md`), в
 соседнем терминале `sudo intel_gpu_top -o /tmp/gpu-msaaN.txt -s 1000`:
 
@@ -11291,7 +11321,11 @@ Expected: `100% tests passed`, включая `tst_surfaceformat::defaultIsNoMul
 `defaultIsNoMultisampling` меняется на `QCOMPARE(surfaceSampleCount(QByteArray()), 4)`
 с комментарием со ссылкой на замер, в design.md D8 дописывается результат.
 
-- [ ] 15.10 **Записать результаты и сменить версию**
+- [x] 15.10 **Записать результаты и сменить версию**
+
+> Выполнено: числа прокси в PERFORMANCE.md, ячейки устройства - «не замерено»;
+> строка RCS - «не замерено (нет `intel_gpu_top`)». В README ещё строка `UQ_MSAA`
+> в таблице переменных окружения. Версия в `CMakeLists.txt` - строка 4.
 
 В `PERFORMANCE.md` добавить раздел:
 
@@ -11321,7 +11355,7 @@ Expected: `100% tests passed`, включая `tst_surfaceformat::defaultIsNoMul
 Версия: `CMakeLists.txt` строка 2 `project(uq-notes VERSION 0.11.0 LANGUAGES CXX)`,
 `packaging/PKGBUILD` `pkgver=0.11.0`.
 
-- [ ] 15.11 **Финальный коммит шага 4**
+- [x] 15.11 **Финальный коммит шага 4**
 
 ```bash
 git add src/canvas/surfaceformat.h src/canvas/surfaceformat.cpp src/CMakeLists.txt \

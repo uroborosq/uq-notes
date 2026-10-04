@@ -13,14 +13,14 @@
 #include <QQmlContext>
 #include <QUrl>
 
+#include "canvas/surfaceformat.h"
+
 int main(int argc, char *argv[])
 {
-    // Кромку чернил сглаживает их материал (InkMaterial, design.md
-    // ink-beauty-pass, D7), а не мультисэмплинг. MSAA 4x пока остаётся ради
-    // остальной сцены - рамок и значков вкладышей, панелей; выключается он
-    // отдельным шагом после аудита этих элементов (D8).
+    // Кромку чернил сглаживает InkMaterial; мультисэмплинг окна нужен только
+    // для сравнения на устройстве (design.md, D8).
     QSurfaceFormat format = QSurfaceFormat::defaultFormat();
-    format.setSamples(4);
+    format.setSamples(surfaceSampleCount(qgetenv("UQ_MSAA")));
     QSurfaceFormat::setDefaultFormat(format);
 
     QGuiApplication app(argc, argv);

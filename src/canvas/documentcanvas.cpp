@@ -1521,7 +1521,12 @@ void DocumentCanvas::updateInsertNodes(int &inkRebuilds, bool &deferred)
     if (!m_insertsRoot)
         return;
 
-    const qreal borderWidth = qFuzzyIsNull(m_zoom) ? 1.0 : kInsertBorderPixels / m_zoom;
+    // Без мультисэмплинга (design.md, D8) рамка шириной в дробное число device px
+    // ложится то на один, то на два пикселя. Ширина округляется до целого
+    // числа device px, не меньше одного.
+    const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
+    const qreal deviceBorder = qMax(1.0, std::round(kInsertBorderPixels * dpr));
+    const qreal borderWidth = qFuzzyIsNull(m_zoom) ? 1.0 : deviceBorder / (dpr * m_zoom);
     QSet<quint64> alive;
     QSGNode *previous = nullptr;
 
