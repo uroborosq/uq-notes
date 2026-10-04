@@ -57,11 +57,17 @@ int main(int argc, char *argv[])
     // Сценарное письмо: непрерывный поток точек пера в течение заданного
     // числа секунд. Без пера иначе нечем проверить ни то, что геометрия
     // доходит до графа сцены, ни что автосохранение не роняет кадры.
+    // UQ_DEMO_STROKE_MS - длина штриха в миллисекундах (по умолчанию 2000):
+    // перо идёт по той же волне с той же скоростью, но отрывается чаще, как
+    // на беглом письме - несколько отрывов в секунду при 200-400.
     if (qEnvironmentVariableIsSet("UQ_DEMO_INK")) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         const int seconds = qMax(1, qEnvironmentVariableIntValue("UQ_DEMO_INK"));
+        const int strokeMs = qEnvironmentVariableIsSet("UQ_DEMO_STROKE_MS")
+                                 ? qMax(50, qEnvironmentVariableIntValue("UQ_DEMO_STROKE_MS"))
+                                 : 2000;
 
-        QTimer::singleShot(900, window, [window, seconds] {
+        QTimer::singleShot(900, window, [window, seconds, strokeMs] {
             QQuickItem *canvas = window->findChild<QQuickItem *>(QStringLiteral("canvas"));
             if (!canvas)
                 return;
@@ -71,10 +77,11 @@ int main(int argc, char *argv[])
             auto *timer = new QTimer(canvas);
             auto *strokeClock = new QElapsedTimer;
             strokeClock->start();
+            auto *strokeIndex = new int(0);
 
             timer->setInterval(8);
             QObject::connect(timer, &QTimer::timeout, canvas,
-                             [canvas, timer, clock, strokeClock, seconds] {
+                             [canvas, timer, clock, strokeClock, strokeIndex, seconds, strokeMs] {
                 const qreal w = canvas->width();
                 const qreal h = canvas->height();
                 const qreal elapsed = clock->elapsed() / 1000.0;
@@ -85,20 +92,24 @@ int main(int argc, char *argv[])
                     timer->deleteLater();
                     delete clock;
                     delete strokeClock;
+                    delete strokeIndex;
                     return;
                 }
 
-                // Штрих длиной около двух секунд, потом отрыв и новый.
+                // Штрих длиной strokeMs, потом отрыв и новый. Волна проходит
+                // полстраницы за две секунды при любой длине штриха.
                 bool drawing = false;
                 QMetaObject::invokeMethod(canvas, "isDrawing", Qt::DirectConnection,
                                           Q_RETURN_ARG(bool, drawing));
-                const qreal t = strokeClock->elapsed() / 2000.0;
-                const QPointF point(w * (0.25 + 0.5 * t),
+                const qreal t = strokeClock->elapsed() / qreal(strokeMs);
+                const qreal sweep = std::fmod((*strokeIndex + t) * strokeMs / 2000.0, 1.0);
+                const QPointF point(w * (0.25 + 0.5 * sweep),
                                     h * 0.5 + std::sin(elapsed * 7.0) * h * 0.18);
 
                 if (t >= 1.0) {
                     QMetaObject::invokeMethod(canvas, "endInk");
                     strokeClock->restart();
+                    ++*strokeIndex;
                     return;
                 }
                 if (!drawing) {
