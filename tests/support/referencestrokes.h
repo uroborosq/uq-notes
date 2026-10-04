@@ -9,6 +9,7 @@
 #include <limits>
 
 #include "ink/inktypes.h"
+#include "ink/wetstroke.h"
 
 // Эталонные траектории для тестов сглаживания и тесселяции. Отдельный файл,
 // потому что одни и те же кривые нужны и фильтру, и тесселятору, и тестам
@@ -210,6 +211,19 @@ inline QList<InkPoint> sampledAtSpeed(const QList<QPointF> &path, qreal speed, q
             break;
     }
     return points;
+}
+
+// Штрих, каким его сохраняет приложение: сырые отсчёты пера через WetStroke
+// (StrokeSampler, точка касания D5) при масштабе zoom. Сравнивать полосу и
+// контур имеет смысл на нём, а не на редкой ломаной: острые стыки редкой
+// ломаной полоса на внутренней стороне покрывает меньше объединения дисков.
+inline Stroke written(const QList<InkPoint> &input, const Stroke &prototype, qreal zoom = 1.0)
+{
+    WetStroke wet;
+    wet.begin(prototype.page, prototype, zoom);
+    for (const InkPoint &point : input)
+        wet.addPoint(point);
+    return wet.finish();
 }
 
 // Прямая с зубцом, который перо проходит быстрее одного кадра экрана в 120 Гц:

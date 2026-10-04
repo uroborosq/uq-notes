@@ -220,11 +220,7 @@ private:
         Stroke prototype;
         prototype.width = width;
         prototype.style = StrokeStyle::Tapered;
-        WetStroke wet;
-        wet.begin(0, prototype, zoom);
-        for (const InkPoint &point : input)
-            wet.addPoint(point);
-        const Stroke stroke = wet.finish();
+        const Stroke stroke = reference::written(input, prototype, zoom);
         QVERIFY(stroke.points.size() > 10);
 
         StrokeTessellator tessellator;

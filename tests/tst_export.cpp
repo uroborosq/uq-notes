@@ -14,7 +14,10 @@
 #include "export/noteexporter.h"
 #include "fixtures.h"
 #include "ink/inkdocument.h"
+#include "ink/stroketessellator.h"
 #include "pdf/pdfdocumentmodel.h"
+#include "support/inkraster.h"
+#include "support/referencestrokes.h"
 
 class TestExport : public QObject
 {
@@ -590,6 +593,116 @@ private slots:
         QVERIFY2(anyRed(QRect(298, 298, 4, 4)), "точки нет в экспорте");
         QVERIFY(anyRed(QRect(296, 299, 1, 2)) && anyRed(QRect(303, 299, 1, 2)));
         QVERIFY(!anyRed(QRect(307, 295, 3, 10)));
+    }
+
+    // ink-beauty-pass, D7, «Экспорт»: чернила в PDF - та же фигура, что на
+    // экране. Сторонний растеризатор (pdftoppm, 144 dpi = 2 px на точку) против
+    // растра полосы по формулам материала: внутри и снаружи штриха, вдали от
+    // кромки, ответы совпадают. Штрихи - волна с нажимом и касание,
+    // пропущенные через WetStroke, как их сохраняет приложение. Окрестность
+    // 3×3 делает сравнение нечувствительным к сдвигу меньше 1.5 px: тест
+    // ловит фигуру (торцы, точку, стыки), а не субпиксельную точность.
+    void exportedInkMatchesScreenStrip()
+    {
+        PdfDocumentModel document;
+        QVERIFY(document.open(fixtures::noOutline()));
+        const Prepared prepared = prepare(document);
+        QCOMPARE(prepared.rotations.first(), 0);
+
+        Stroke prototype;
+        prototype.page = 0;
+        prototype.width = 8.0;
+        prototype.color = QColor(220, 20, 30);
+        prototype.style = StrokeStyle::Tapered;
+        // Нажим у концов не ниже 0.6: торцы в 5 px - заметная часть фигуры.
+        QList<InkPoint> input = wave(0, 300).points;
+        for (int i = 0; i < input.size(); ++i)
+            input[i].pressure = 0.6 + 0.4 * std::sin(M_PI * i / (input.size() - 1));
+        const Stroke stroke = reference::written(input, prototype);
+        // Касание (D5) - диск толщиной в перо.
+        const Stroke tap = reference::written(
+            {{QPointF(300, 250), 0.9, 0.0}, {QPointF(300, 250), 0.9, 0.01}}, prototype);
+        QVERIFY(stroke.isValid() && tap.isValid());
+        InkDocument ink;
+        QVERIFY(ink.addStroke(stroke) != 0);
+        QVERIFY(ink.addStroke(tap) != 0);
+
+        const QString output = m_dir.filePath(QStringLiteral("parity.pdf"));
+        QString error;
+        QVERIFY2(NoteExporter::exportNow(fixtures::noOutline(), prepared.sizes,
+                                         prepared.rotations, ink.allStrokes(), output, &error),
+                 qPrintable(error));
+
+        const QString png = m_dir.filePath(QStringLiteral("parity"));
+        QProcess render;
+        render.start(QStringLiteral("pdftoppm"),
+                     {QStringLiteral("-f"), QStringLiteral("1"), QStringLiteral("-l"),
+                      QStringLiteral("1"), QStringLiteral("-r"), QStringLiteral("144"),
+                      QStringLiteral("-png"), output, png});
+        QVERIFY(render.waitForFinished(60000));
+        const QFileInfo root(png);
+        const QStringList produced =
+            QDir(root.absolutePath())
+                .entryList({root.fileName() + QStringLiteral("-*.png")}, QDir::Files);
+        QVERIFY(!produced.isEmpty());
+        const QImage image(QDir(root.absolutePath()).filePath(produced.first()));
+        QVERIFY(!image.isNull());
+
+        StrokeTessellator tessellator;
+        tessellator.setWidth(stroke.width);
+        tessellator.setStyle(stroke.style);
+        // Две полосы в одной, как их сливает батч Qt Quick: повтор последней
+        // вершины одной и первой другой даёт только вырожденные треугольники.
+        QVector<AxisVertex> both = tessellator.tessellate(stroke.points);
+        const QVector<AxisVertex> dot = tessellator.tessellate(tap.points);
+        both << both.constLast() << dot.constFirst() << dot;
+        const inkraster::Coverage strip = inkraster::rasterize(
+            both, QTransform::fromScale(2.0, 2.0), image.width(), image.height());
+
+        // Сравниваются только пиксели, у которых вся окрестность 3×3 у полосы
+        // либо сплошь залита, либо пуста: сглаживание poppler и кромка не в счёт.
+        const auto solid = [&strip](int x, int y, bool inked) {
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const float a = strip.at(x + dx, y + dy);
+                    if (inked ? a < 0.98f : a > 0.02f)
+                        return false;
+                }
+            return true;
+        };
+        int inside = 0;
+        int outside = 0;
+        int mismatches = 0;
+        QString first;
+        // Волна wave(0, 300): x 60…520, y 250…350 в точках страницы, касание -
+        // в (300, 250); рамка с запасом.
+        const QRect area = QRect(QPoint(2 * 40, 2 * 220), QPoint(2 * 540, 2 * 380))
+                               .intersected(image.rect().adjusted(1, 1, -1, -1));
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            for (int x = area.left(); x <= area.right(); ++x) {
+                const bool inked = solid(x, y, true);
+                if (!inked && !solid(x, y, false))
+                    continue;
+                const QColor pixel = image.pixelColor(x, y);
+                const bool red = pixel.red() > 150 && pixel.green() < 110 && pixel.blue() < 110;
+                ++(inked ? inside : outside);
+                if (red != inked) {
+                    if (mismatches++ == 0)
+                        first = QStringLiteral("(%1, %2): полоса %3, PDF %4")
+                                    .arg(x)
+                                    .arg(y)
+                                    .arg(inked ? QStringLiteral("чернила") : QStringLiteral("фон"))
+                                    .arg(red ? QStringLiteral("чернила") : QStringLiteral("фон"));
+                }
+            }
+        }
+        QVERIFY2(inside > 500 && outside > 500,
+                 qPrintable(QStringLiteral("сравнивать нечего: внутри %1, снаружи %2")
+                                .arg(inside)
+                                .arg(outside)));
+        QVERIFY2(mismatches == 0, qPrintable(QStringLiteral("%1 расхождений, первое %2")
+                                                 .arg(mismatches)
+                                                 .arg(first)));
     }
 
 private:

@@ -211,9 +211,12 @@ bool NoteExporter::exportNow(const QString &sourcePdf, const QList<QSizeF> &disp
                     QPainterPath path;
                     path.addPolygon(outline);
                     path.closeSubpath();
-                    // Заливка по правилу ненулевого обхода: на петлях и резких
-                    // стыках контур сам себя перекрывает, и even-odd оставил бы
-                    // в этих местах дырки.
+                    // Контур - те же примитивы, что полоса на экране: дуги
+                    // торцов, стороны, внешние дуги стыков (design.md
+                    // ink-beauty-pass, D7); паритет держат tst_inkparity и
+                    // tst_export. Заливка по ненулевому обходу: на петлях и
+                    // резких стыках контур сам себя перекрывает, и even-odd
+                    // оставил бы дырки.
                     path.setFillRule(Qt::WindingFill);
                     painter.fillPath(path, record->stroke.color);
                 }

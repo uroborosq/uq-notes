@@ -10096,6 +10096,18 @@ EOF
 
 ## 13. Экспорт: паритет контура `outline()` и полосы на экране
 
+> **Изменение при исполнении.** Штрихи паритета - выход `WetStroke`
+> (`reference::written` в `tests/support/referencestrokes.h`), а не редкие ломаные:
+> на редкой ломаной с острым поворотом полоса на внутренней стороне стыка покрывает
+> меньше объединения дисков, которое после правки `outline()` (внутренняя сторона
+> через центр стыка) заливает контур. На настоящем штрихе расхождений нет, поэтому
+> острые углы (зигзаг, «N», со стоянкой и без) в паритет входят; пол 0.15 px ни в
+> одном случае не включается. Тест - строки данных: 10 траекторий × масштаб письма
+> 1 и 2.5, сравнение на 1, 2.5 и 8 (на 8 видны щели заливки на остриях). Заливка
+> контура - `QPainter` без сглаживания (у сравниваемых пикселей центр дальше 0.5 px
+> от ребра). Тест экспорта: волна с нажимом у концов не ниже 0.6 и касание - с
+> исходным нажимом 0.15 торцы тоньше окрестности 3×3, и плоские торцы не ловились.
+
 Контур из общих примитивов написан в 11.4: без него группа 11 не собиралась. Здесь -
 тесты, которые закрепляют D7 «Экспорт»: растр заливки контура и растр полосы совпадают
 везде, кроме полосы ±0.5 px вдоль кромки. Сначала на CPU-растре по формулам материала,
@@ -10107,7 +10119,7 @@ EOF
 - Modify: `tests/tst_export.cpp` (экспорт против растра полосы)
 - Modify: `src/export/noteexporter.cpp` (комментарий)
 
-- [ ] 13.1 **`tests/support/inkraster.h`**
+- [x] 13.1 **`tests/support/inkraster.h`**
 
 ```cpp
 #pragma once
@@ -10213,7 +10225,7 @@ inline Coverage rasterize(const QVector<AxisVertex> &strip, const QTransform &pa
 } // namespace inkraster
 ```
 
-- [ ] 13.2 **Тест паритета: `tests/tst_inkparity.cpp`**
+- [x] 13.2 **Тест паритета: `tests/tst_inkparity.cpp`**
 
 ```cpp
 // ink-beauty-pass, D7, «Экспорт»: контур outline() и полоса на экране - одна
@@ -10395,7 +10407,7 @@ QTEST_MAIN(TestInkParity)
 uq_add_test(tst_inkparity tst_inkparity.cpp)
 ```
 
-- [ ] 13.3 **Прогон паритета**
+- [x] 13.3 **Прогон паритета**
 
 ```
 cmake -S . -B build && cmake --build build -j$(nproc) --target tst_inkparity && \
@@ -10413,7 +10425,7 @@ ctest --test-dir build -R tst_inkparity --output-on-failure
 закрывают соседние сегменты, поэтому расхождение доходит до пикселя только при
 повороте больше примерно 140° у тонкой линии.
 
-- [ ] 13.4 **Тест экспорта против растра полосы (закрепляющий): `tests/tst_export.cpp`**
+- [x] 13.4 **Тест экспорта против растра полосы (закрепляющий): `tests/tst_export.cpp`**
 
 К подключениям добавить `#include "ink/stroketessellator.h"` и `#include "support/inkraster.h"`.
 В `private slots:` добавить:
@@ -10511,7 +10523,7 @@ ctest --test-dir build -R tst_inkparity --output-on-failure
 ловит: временно вернуть в `outline()` торцы плоской парой (заменить вызовы `capArc` на
 одну точку `c ± n·hw`), убедиться в провале и вернуть.
 
-- [ ] 13.5 **Прогон экспорта**
+- [x] 13.5 **Прогон экспорта**
 
 ```
 cmake --build build -j$(nproc) --target tst_export && \
@@ -10520,7 +10532,7 @@ ctest --test-dir build -R 'tst_(export|inkparity)' --output-on-failure
 
 Ожидаемо: `100% tests passed` (нужны `pdftoppm` и `qpdf` - как и остальным тестам экспорта).
 
-- [ ] 13.6 **`src/export/noteexporter.cpp`: комментарий о контуре**
+- [x] 13.6 **`src/export/noteexporter.cpp`: комментарий о контуре**
 
 Комментарий над `path.setFillRule(Qt::WindingFill);` заменить:
 
@@ -10536,7 +10548,7 @@ ctest --test-dir build -R 'tst_(export|inkparity)' --output-on-failure
 его ставит шаг 1 (контракт). Проверить: `grep -n setStyle src/export/noteexporter.cpp`;
 ожидаемо одна строка.
 
-- [ ] 13.7 **Полный прогон и коммит**
+- [x] 13.7 **Полный прогон и коммит**
 
 ```
 ctest --test-dir build --output-on-failure

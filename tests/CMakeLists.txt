@@ -53,6 +53,7 @@ target_link_libraries(tst_inkmaterial PRIVATE Qt6::GuiPrivate)
 # На GPU: QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu. Под offscreen - SKIP.
 uq_add_test(tst_inkmaterialgpu tst_inkmaterialgpu.cpp)
 target_link_libraries(tst_inkmaterialgpu PRIVATE Qt6::GuiPrivate)
+uq_add_test(tst_inkparity tst_inkparity.cpp)
 uq_add_test(tst_inkdocument tst_inkdocument.cpp)
 uq_add_test(tst_wetstroke tst_wetstroke.cpp)
 uq_add_test(tst_canvasink tst_canvasink.cpp)
