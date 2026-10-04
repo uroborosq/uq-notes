@@ -19,7 +19,7 @@ license=('custom')
 # soname пакет надо пересобрать.
 depends=('qt6-base' 'qt6-declarative' 'qt6-webengine' 'qt6-wayland' 'qpdf' 'abseil-cpp'
          'hicolor-icon-theme')
-makedepends=('cmake' 'librsvg')
+makedepends=('cmake' 'librsvg' 'qt6-shadertools')
 optdepends=('poppler: сторонняя проверка экспортированных PDF')
 
 source=()

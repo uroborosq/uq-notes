@@ -9051,7 +9051,7 @@ EOF
 `/usr/lib/qt6/bin/qsb`). Шейдеры собираются в `.qsb` при сборке и лежат в ресурсах,
 поэтому пакету он нужен только как зависимость сборки.
 
-- [ ] 12.1 **Падающий тест материала: `tests/tst_inkmaterial.cpp`**
+- [x] 12.1 **Падающий тест материала: `tests/tst_inkmaterial.cpp`**
 
 ```cpp
 // ink-beauty-pass, D7: материал чернил. Тип мокрого слоя отличается от сухого
@@ -9225,7 +9225,7 @@ uq_add_test(tst_inkmaterial tst_inkmaterial.cpp)
 target_link_libraries(tst_inkmaterial PRIVATE Qt6::GuiPrivate)
 ```
 
-- [ ] 12.2 **Прогон - ожидаемый провал**
+- [x] 12.2 **Прогон - ожидаемый провал**
 
 ```
 cmake -S . -B build && cmake --build build --target tst_inkmaterial
@@ -9233,7 +9233,7 @@ cmake -S . -B build && cmake --build build --target tst_inkmaterial
 
 Ожидаемо: ошибка компиляции - нет `canvas/inkmaterial.h`.
 
-- [ ] 12.3 **Зависимость сборки ShaderTools**
+- [x] 12.3 **Зависимость сборки ShaderTools**
 
 `CMakeLists.txt` (корень): строку `find_package(Qt6 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Pdf Sql Concurrent)`
 заменить:
@@ -9256,7 +9256,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Pdf Sql Concu
 чернил (`src/canvas/shaders/`).
 ```
 
-- [ ] 12.4 **Шейдеры**
+- [x] 12.4 **Шейдеры**
 
 `src/canvas/shaders/ink.vert`:
 
@@ -9335,7 +9335,7 @@ void main()
 }
 ```
 
-- [ ] 12.5 **`src/canvas/inkmaterial.h`**
+- [x] 12.5 **`src/canvas/inkmaterial.h`**
 
 ```cpp
 #pragma once
@@ -9404,7 +9404,7 @@ private:
 };
 ```
 
-- [ ] 12.6 **`src/canvas/inkmaterial.cpp`**
+- [x] 12.6 **`src/canvas/inkmaterial.cpp`**
 
 ```cpp
 #include "inkmaterial.h"
@@ -9553,7 +9553,7 @@ const QSGGeometry::AttributeSet &InkMaterial::attributes()
 }
 ```
 
-- [ ] 12.7 **`src/CMakeLists.txt`: исходники и шейдеры**
+- [x] 12.7 **`src/CMakeLists.txt`: исходники и шейдеры**
 
 В SOURCES `qt_add_qml_module` после `canvas/insertlistmodel.h` добавить:
 
@@ -9578,7 +9578,7 @@ qt_add_shaders(uqnotes_core "uqnotes_ink_shaders"
 )
 ```
 
-- [ ] 12.8 **Прогон `tst_inkmaterial`**
+- [x] 12.8 **Прогон `tst_inkmaterial`**
 
 ```
 cmake -S . -B build 2>&1 | grep 'exposed as' ; \
@@ -9592,7 +9592,7 @@ ctest --test-dir build -R tst_inkmaterial --output-on-failure
 библиотека с `InkMaterial` и `qt_add_shaders`, тест против неё): `Totals: 11 passed`,
 ресурсы `.qsb` доходят до теста сами.
 
-- [ ] 12.9 **Материал на настоящем RHI: `tests/tst_inkmaterialgpu.cpp`**
+- [x] 12.9 **Материал на настоящем RHI: `tests/tst_inkmaterialgpu.cpp`**
 
 Граф сцены Qt Quick рисует полосы `InkMaterial` в текстуру через `QQuickRenderControl`
 (окна на экране нет), профиль кромки сверяется с CPU-зеркалом. Под `offscreen` RHI нет,
@@ -9785,7 +9785,7 @@ QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu
 `pxPerUnit` на `dpr` без матрицы, тест падает на зуме 2 («ошибка покрытия 0.05»):
 он ловит потерю зума в униформе.
 
-- [ ] 12.10 **Падающие тесты графа сцены: `tests/tst_pagescenegraph.cpp`**
+- [x] 12.10 **Падающие тесты графа сцены: `tests/tst_pagescenegraph.cpp`**
 
 В `private slots:` добавить:
 
@@ -9860,7 +9860,7 @@ QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu
 Прогон: `cmake --build build --target tst_pagescenegraph` - ожидаемо ошибка: нет
 `InkMaterialStats`, `inkMaterialStats`, `dryInkNodeRebuildCount`.
 
-- [ ] 12.11 **`src/canvas/documentcanvas.h`: диагностика материала**
+- [x] 12.11 **`src/canvas/documentcanvas.h`: диагностика материала**
 
 После объявления `int wetStripVertexCount() const ...` добавить:
 
@@ -9890,7 +9890,7 @@ QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu
     int m_dryInkNodeRebuilds = 0;
 ```
 
-- [ ] 12.12 **`src/canvas/documentcanvas.cpp`: переход с `QSGFlatColorMaterial` на `InkMaterial`**
+- [x] 12.12 **`src/canvas/documentcanvas.cpp`: переход с `QSGFlatColorMaterial` на `InkMaterial`**
 
 Подключения: строку `#include <QSGFlatColorMaterial>` удалить; добавить `#include <cstring>`
 и, после `#include "canvas/insertlistmodel.h"`, `#include "canvas/inkmaterial.h"`.
@@ -10001,7 +10001,7 @@ DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) cons
 }
 ```
 
-- [ ] 12.13 **`src/main.cpp`: комментарий о MSAA**
+- [x] 12.13 **`src/main.cpp`: комментарий о MSAA**
 
 Комментарий над `QSurfaceFormat format = ...` заменить:
 
@@ -10012,7 +10012,7 @@ DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) cons
     // отдельным шагом после аудита этих элементов (D8).
 ```
 
-- [ ] 12.14 **Прогон графа сцены и холста**
+- [x] 12.14 **Прогон графа сцены и холста**
 
 ```
 cmake --build build -j$(nproc) && \
@@ -10023,7 +10023,7 @@ ctest --test-dir build -R 'tst_(pagescenegraph|documentcanvas|canvasink|insertov
 узлы с материалом не растеризует, а проверяется структура графа - как и раньше с
 `QSGFlatColorMaterial`.
 
-- [ ] 12.15 **Полный прогон и коммит**
+- [x] 12.15 **Полный прогон и коммит**
 
 ```
 ctest --test-dir build --output-on-failure

@@ -10,10 +10,12 @@
 Arch Linux:
 
 ```
-pacman -S qt6-base qt6-declarative qt6-wayland qt6-webengine qpdf abseil-cpp cmake
+pacman -S qt6-base qt6-declarative qt6-wayland qt6-webengine qt6-shadertools qpdf abseil-cpp cmake
 ```
 
 `qt6-webengine` нужен ради модуля QtPdf — он поставляется именно там.
+`qt6-shadertools` нужен только для сборки: им собираются шейдеры материала
+чернил (`src/canvas/shaders/`).
 `abseil-cpp` нужен модели траектории штриха
 [ink-stroke-modeler](https://github.com/google/ink-stroke-modeler) — той же, что
 у rnote. Сама модель лежит подмодулем в `third_party/`, до первой сборки её надо

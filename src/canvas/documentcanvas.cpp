@@ -5,14 +5,15 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <QSGClipNode>
-#include <QSGFlatColorMaterial>
 #include <QSGGeometryNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGTransformNode>
 
 #include "canvas/insertlistmodel.h"
+#include "canvas/inkmaterial.h"
 #include "pdf/pagerenderservice.h"
 #include "pdf/pdfdocumentmodel.h"
 #include "perf/framestats.h"
@@ -199,22 +200,28 @@ private:
 namespace {
 
 // Размер куска мокрого штриха в вершинах и перекрытие между кусками.
-// Перекрытие в две вершины сохраняет непрерывность треугольной полосы и её
-// чётность на границе куска.
+// Перекрытие в две вершины воспроизводит на границе куска все треугольники
+// полосы - и сегменты, и веера вокруг центров стыков (повтор центральной
+// вершины): треугольник i - это вершины i, i+1, i+2.
 constexpr int kWetChunkVertices = 512;
 constexpr int kWetChunkOverlap = 2;
 
-QSGGeometryNode *makeStripNode(const QColor &color)
+static_assert(sizeof(StrokeTessellator::Vertex) == 24, "раскладка InkMaterial::attributes()");
+
+// Узел полосы чернил. batchKey различает куски мокрого штриха: каждый - свой
+// батч, на событие пера перезаливается только изменившийся.
+QSGGeometryNode *makeStripNode(const QColor &color, InkMaterial::Layer layer, int batchKey = 0)
 {
     auto *node = new QSGGeometryNode;
 
-    auto *geometry = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 0);
+    auto *geometry = new QSGGeometry(InkMaterial::attributes(), 0);
     geometry->setDrawingMode(QSGGeometry::DrawTriangleStrip);
     node->setGeometry(geometry);
     node->setFlag(QSGNode::OwnsGeometry, true);
 
-    auto *material = new QSGFlatColorMaterial;
+    auto *material = new InkMaterial(layer);
     material->setColor(color);
+    material->setBatchKey(batchKey);
     node->setMaterial(material);
     node->setFlag(QSGNode::OwnsMaterial, true);
 
@@ -225,13 +232,7 @@ void uploadStrip(QSGGeometryNode *node, const StrokeTessellator::Vertex *source,
 {
     QSGGeometry *geometry = node->geometry();
     geometry->allocate(count);
-    auto *target = geometry->vertexDataAsPoint2D();
-    // Мост до материала чернил: плоский материал под MSAA получает полосу в
-    // покое - вершины на полуширине, без выноса бахромы.
-    for (int i = 0; i < count; ++i) {
-        const QPointF p = source[i].at(source[i].hw);
-        target[i].set(float(p.x()), float(p.y()));
-    }
+    std::memcpy(geometry->vertexData(), source, size_t(count) * sizeof(StrokeTessellator::Vertex));
     node->markDirty(QSGNode::DirtyGeometry);
 }
 
@@ -398,6 +399,48 @@ DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
         }
     }
     return InkLayering::AboveRaster;
+}
+
+DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) const
+{
+    InkMaterialStats stats;
+    PageSceneNode *node = m_nodes.value(page);
+    if (!node)
+        return stats;
+
+    QList<QSGMaterialType *> dryTypes;
+    const InkMaterial *previousWet = nullptr;
+    const auto visit = [&](QSGNode *layer, InkMaterial::Layer expected) {
+        if (!layer)
+            return;
+        const bool wet = expected == InkMaterial::Layer::Wet;
+        for (QSGNode *child = layer->firstChild(); child; child = child->nextSibling()) {
+            ++(wet ? stats.wetNodes : stats.dryNodes);
+            if (child->type() != QSGNode::GeometryNodeType) {
+                ++stats.foreignNodes;
+                continue;
+            }
+            auto *geometryNode = static_cast<QSGGeometryNode *>(child);
+            const auto *material = dynamic_cast<const InkMaterial *>(geometryNode->material());
+            if (!material || material->layer() != expected
+                || geometryNode->geometry()->sizeOfVertex() != int(sizeof(AxisVertex))) {
+                ++stats.foreignNodes;
+                continue;
+            }
+            if (!wet) {
+                dryTypes.append(material->type());
+                continue;
+            }
+            if (dryTypes.contains(material->type()))
+                stats.dryAndWetTypesDiffer = false;
+            if (previousWet && previousWet->compare(material) == 0)
+                stats.wetChunksSeparate = false;
+            previousWet = material;
+        }
+    };
+    visit(node->ink.dryInk, InkMaterial::Layer::Dry);
+    visit(node->ink.wetInk, InkMaterial::Layer::Wet);
+    return stats;
 }
 
 // Вкладыш виден поверх страниц, когда его узел - в слое вкладышей, этот слой
@@ -1161,13 +1204,14 @@ bool DocumentCanvas::updateDryInkNodes(InkLayerNodes &layer, const QList<StrokeG
     }
 
     layer.dryInkIds = ids;
+    ++m_dryInkNodeRebuilds;
     if (geometry.isEmpty())
         return true;
 
     layer.dryInk = new QSGNode;
     attach(layer.dryInk, false);
     for (const StrokeGeometry &entry : geometry) {
-        QSGGeometryNode *strokeNode = makeStripNode(entry.color);
+        QSGGeometryNode *strokeNode = makeStripNode(entry.color, InkMaterial::Layer::Dry);
         uploadStrip(strokeNode, entry.strip.constData(), entry.strip.size());
         layer.dryInk->appendChildNode(strokeNode);
     }
@@ -1202,7 +1246,9 @@ void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
                     / (kWetChunkVertices - kWetChunkOverlap));
 
     while (layer.wetChunks.size() < needed) {
-        QSGGeometryNode *chunk = makeStripNode(m_penColor);
+        // Номер куска - ключ батча: куски не сливаются в один батч.
+        QSGGeometryNode *chunk = makeStripNode(m_penColor, InkMaterial::Layer::Wet,
+                                               int(layer.wetChunks.size()));
         layer.wetInk->appendChildNode(chunk);
         layer.wetChunks.append(chunk);
     }

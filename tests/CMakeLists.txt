@@ -1,6 +1,6 @@
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(QPDF REQUIRED IMPORTED_TARGET libqpdf)
-find_package(Qt6 REQUIRED COMPONENTS Test)
+find_package(Qt6 REQUIRED COMPONENTS Test GuiPrivate)
 
 add_subdirectory(fixtures/generator)
 add_subdirectory(support/crashwriter)
@@ -47,6 +47,12 @@ uq_add_test(tst_documentcanvas tst_documentcanvas.cpp)
 uq_add_test(tst_strokesampler tst_strokesampler.cpp)
 uq_add_test(tst_stroketessellator tst_stroketessellator.cpp)
 uq_add_test(tst_inkcoverage tst_inkcoverage.cpp)
+# QShader и его отражение - в приватных заголовках QtGui (rhi/qshader.h).
+uq_add_test(tst_inkmaterial tst_inkmaterial.cpp)
+target_link_libraries(tst_inkmaterial PRIVATE Qt6::GuiPrivate)
+# На GPU: QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu. Под offscreen - SKIP.
+uq_add_test(tst_inkmaterialgpu tst_inkmaterialgpu.cpp)
+target_link_libraries(tst_inkmaterialgpu PRIVATE Qt6::GuiPrivate)
 uq_add_test(tst_inkdocument tst_inkdocument.cpp)
 uq_add_test(tst_wetstroke tst_wetstroke.cpp)
 uq_add_test(tst_canvasink tst_canvasink.cpp)

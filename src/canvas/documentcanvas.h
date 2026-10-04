@@ -152,6 +152,22 @@ public:
     // кусок со старой геометрией за её концом дал бы число больше.
     Q_INVOKABLE int wetInkCoveredVertexCount(int page) const;
     int wetStripVertexCount() const { return int(m_wet.strip().size()); }
+    // Чем нарисованы чернила страницы (design.md ink-beauty-pass, D7). Узел
+    // «чужой», если он не на InkMaterial своего слоя или вершина не AxisVertex.
+    // Типы сухого и мокрого слоёв обязаны различаться, а куски мокрого штриха -
+    // не совпадать по compare(), иначе батч-рендер их сольёт.
+    struct InkMaterialStats
+    {
+        int dryNodes = 0;
+        int wetNodes = 0;
+        int foreignNodes = 0;
+        bool dryAndWetTypesDiffer = true;
+        bool wetChunksSeparate = true;
+    };
+    InkMaterialStats inkMaterialStats(int page) const;
+    // Сколько раз узлы сухих чернил пересобирались (страницы и вкладыши). Зум
+    // и прокрутка этого числа не меняют.
+    int dryInkNodeRebuildCount() const { return m_dryInkNodeRebuilds; }
 
     FrameStats *frameStats() const { return m_frameStats; }
     void setFrameStats(FrameStats *stats);
@@ -452,6 +468,8 @@ private:
     QSGNode *m_pagesRoot = nullptr;
     QSGNode *m_insertsRoot = nullptr;
     QHash<quint64, InsertSceneNode *> m_insertNodes;
+    // Счётчик пересборок узлов сухих чернил; пишется из updatePaintNode.
+    int m_dryInkNodeRebuilds = 0;
 
     QHash<int, PageEntry> m_pages;
     qint64 m_rasterBudget = kRasterMemoryBudget;

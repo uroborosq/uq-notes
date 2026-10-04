@@ -12,6 +12,8 @@
 #include <QSGRendererInterface>
 #include <QTest>
 
+#include <cmath>
+
 #include "canvas/documentcanvas.h"
 #include "fixtures.h"
 #include "ink/inkdocument.h"
@@ -434,6 +436,72 @@ private slots:
         canvas->openInsert(id);
         renderFrames(&fixture.window, 1);
         QCOMPARE(canvas->insertLayering(id), DocumentCanvas::InsertLayering::AbovePages);
+    }
+
+    // ink-beauty-pass, D7: сухие и мокрые чернила нарисованы материалом
+    // чернил, у мокрого слоя свой тип (иначе он сливается в батч с сухими),
+    // куски мокрого штриха не сливаются друг с другом.
+    void inkNodesUseInkMaterial()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        renderFrames(&fixture.window, 3);
+
+        // Длинный мокрый штрих - больше одного куска по 512 вершин.
+        qreal time = 3.0;
+        QCOMPARE(canvas->pageAtView(QPointF(300, 420)), 0);
+        QVERIFY(canvas->beginInkAt(QPointF(300, 420), 0.6, false, time));
+        for (int i = 1; i <= 400; ++i) {
+            time += 1.0 / 240.0;
+            canvas->continueInkAt(QPointF(300 + i * 0.9, 420 + 30.0 * std::sin(i / 5.0)), 0.6,
+                                  time);
+        }
+        renderFrames(&fixture.window, 2);
+        QVERIFY2(canvas->wetStripVertexCount() > 512,
+                 qPrintable(QStringLiteral("полоса %1 не дошла до второго куска")
+                                .arg(canvas->wetStripVertexCount())));
+
+        const DocumentCanvas::InkMaterialStats stats = canvas->inkMaterialStats(0);
+        QVERIFY(stats.dryNodes > 0);
+        QVERIFY(stats.wetNodes > 1);
+        QCOMPARE(stats.foreignNodes, 0);
+        QVERIFY2(stats.dryAndWetTypesDiffer, "мокрый слой с типом сухого сольётся с ним в батч");
+        QVERIFY2(stats.wetChunksSeparate, "куски мокрого штриха сливаются в один батч");
+
+        canvas->endInk();
+        renderFrames(&fixture.window, 2);
+        QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 0);
+        QCOMPARE(canvas->inkMaterialStats(0).foreignNodes, 0);
+    }
+
+    // Сценарий «Изменение масштаба» (ink-input, «Сглаживание кромки чернил»):
+    // кромка пересчитывается в шейдере, геометрия штрихов не пересобирается.
+    void zoomDoesNotRebuildInkGeometry()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 320));
+        renderFrames(&fixture.window, 3);
+        QVERIFY(canvas->inkMaterialStats(0).dryNodes > 0);
+
+        const int rebuilds = canvas->dryInkNodeRebuildCount();
+        for (const qreal zoom : {2.0, 0.6, 1.4, 3.0}) {
+            canvas->setZoom(zoom);
+            renderFrames(&fixture.window, 1);
+        }
+        QCOMPARE(canvas->dryInkNodeRebuildCount(), rebuilds);
+        QVERIFY(canvas->inkMaterialStats(0).dryNodes > 0);
     }
 };
 

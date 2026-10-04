@@ -15,6 +15,8 @@ qt_add_qml_module(uqnotes_core
         canvas/documentlayout.h
         canvas/insertlistmodel.cpp
         canvas/insertlistmodel.h
+        canvas/inkmaterial.cpp
+        canvas/inkmaterial.h
         ink/inkdocument.cpp
         ink/inkdocument.h
         ink/inkcoverage.h
@@ -66,6 +68,18 @@ target_link_libraries(uqnotes_core PUBLIC
     Qt6::Concurrent
     PkgConfig::QPDF
     ink_stroke_modeler
+)
+
+# Шейдеры материала чернил (design.md ink-beauty-pass, D7). BATCHABLE
+# обязателен для материалов Qt Quick: без батчируемого варианта вершинного
+# шейдера узлы чернил не сливаются в батчи. Ресурсы: :/uqnotes/shaders/*.qsb.
+qt_add_shaders(uqnotes_core "uqnotes_ink_shaders"
+    BATCHABLE
+    PREFIX "/uqnotes"
+    BASE canvas
+    FILES
+        canvas/shaders/ink.vert
+        canvas/shaders/ink.frag
 )
 
 # Задержка «событие -> показ» по wp_presentation (ink-beauty-pass, D1). Только
