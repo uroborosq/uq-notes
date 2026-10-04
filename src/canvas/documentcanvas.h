@@ -155,7 +155,7 @@ public:
     // кусок со старой геометрией за её концом дал бы число больше.
     Q_INVOKABLE int wetInkCoveredVertexCount(int page) const;
     int wetStripVertexCount() const { return int(m_wet.strip().size()); }
-    // Чем нарисованы чернила страницы (design.md ink-beauty-pass, D7). Узел
+    // Чем нарисованы чернила страницы (design.md ink-beauty-pass, D7, D10). Узел
     // «чужой», если он не на InkMaterial своего слоя или вершина не AxisVertex.
     // Типы сухого и мокрого слоёв обязаны различаться, а куски мокрого штриха -
     // не совпадать по compare(), иначе батч-рендер их сольёт. Недавние штрихи

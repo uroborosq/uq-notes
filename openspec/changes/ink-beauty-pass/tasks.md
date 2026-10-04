@@ -10575,7 +10575,9 @@ EOF
 - Modify: `PERFORMANCE.md` (раздел о материале чернил)
 - Modify: `tools/stroke-lab/README.md` (app-ink, baseline после шага 3)
 
-- [x] 14.1 **Собрать на устройстве обе версии для сравнения**
+- [ ] 14.1 **Собрать на устройстве обе версии для сравнения**
+  - [x] прокси на машине разработки (Sway, Iris Xe, 60 Гц)
+  - [ ] на устройстве (Galaxy Book, KWin, 120 Гц, `kb.pdf`)
 
 > Выполнено на машине разработки (Sway, Iris Xe, 60 Гц), не на устройстве: 0.9.0
 > собрана в `/tmp/uq-090` (`git worktree add /tmp/uq-090 6a4540c`, cherry-pick 9b539e9
@@ -10634,7 +10636,9 @@ QT_FORCE_STDERR_LOGGING=1 QSG_RENDERER_DEBUG=upload UQ_DEMO_INK=3 ./build/src/uq
 читает ту же заметку (схема `.uqn` не менялась в шаге 3), поэтому сравнение в
 14.3 идёт на одном файле.
 
-- [x] 14.2 **Батчинг: мокрый штрих не перезаливает страницу**
+- [ ] 14.2 **Батчинг: мокрый штрих не перезаливает страницу**
+  - [x] прокси на машине разработки (Sway, Iris Xe, 60 Гц)
+  - [ ] на устройстве (Galaxy Book, KWin, 120 Гц, `kb.pdf`)
 
 > Выполнено (прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц), не устройство); на 60 Гц окна - по 600 кадров (10 с). 200 страниц: медиана
 > 8484 байт на кадр, p95 15372 / 15428 в начале / конце, кадров > 1 МБ - 0.
@@ -10820,7 +10824,9 @@ UQ_DEMO_NAV=30 UQ_FRAME_LOG=1 ./build/src/uq-notes /tmp/dense.pdf | tail -n 2
 `UQ_DEMO_NAV` (раздел о зоне удержания); зум меняет только униформы
 (`tst_pagescenegraph::zoomDoesNotRebuildInkGeometry`).
 
-- [x] 14.5 **Память VBO**
+- [ ] 14.5 **Память VBO**
+  - [x] прокси на машине разработки (Sway, Iris Xe, 60 Гц)
+  - [ ] на устройстве (Galaxy Book, KWin, 120 Гц, `kb.pdf`)
 
 > Выполнено (прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц), не устройство), пик RSS при `UQ_DEMO_NAV=30`: 200 страниц - 350 МиБ против
 > 347-349 у 0.9.0; плотная страница - 492 против 402-404 (+89 МиБ, предел 100 МБ).
@@ -10841,7 +10847,8 @@ echo "пик RSS ${peak} КБ"
 
 - [ ] 14.6 **Сценарии спеки «Сглаживание кромки чернил» глазами**
 
-> Сделано здесь (прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц), не устройство): `tst_inkmaterialgpu` на Iris Xe - `Totals: 6 passed`;
+> Сделано здесь (прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц), не устройство): `tst_inkmaterialgpu` на Iris Xe - `Totals: 8 passed`
+> (6 тестов и `initTestCase`/`cleanupTestCase`);
 > снимки сценарных чернил (слова «minimum» и «привет» из корпуса стенда, вставлены
 > в заметку точками, мимо сэмплера) в `/tmp/uq-g14/shots/` для обеих сборок:
 > перо 1 pt на 100%, 250% и 50% - линия сплошная, без тёмных точек на стыках;
@@ -10849,13 +10856,16 @@ echo "пик RSS ${peak} КБ"
 > красное, зелёное и белое перо на тёмной странице - свой цвет у обеих сборок.
 > Не выполнено: нужен Galaxy Book с пером - сценарии 0-6 этого шага: 0 на GPU
 > устройства, 1-2 и 5 написанными пером, 3 (мерцание при медленной прокрутке),
-> 4 (зум 25% → 800%), 6 (отрыв). Там: `QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu`,
+> 4 (зум 25% → 800%), 6 (отрыв). Автоматически, без глаз, после финальной рецензии
+> закрыты: 3 - `tst_inkcoverage::slowScrollDoesNotFlicker` (CPU-зеркало, сдвиги 0-0.75
+> px, мерцание по метрике `aa_flicker` стенда), 5 - `tst_inkmaterial::colorUniformIsPremultipliedByOpacity`
+> и `tst_inkmaterialgpu::coloredInkKeepsItsColorOnDarkPage`. Там: `QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu`,
 > письмо пером в `./build/src/uq-notes ~/kb.pdf` и снимок
 > `UQ_GOTO_PAGE=0 UQ_SCREENSHOT=/tmp/ink-0.10.png UQ_SCREENSHOT_DELAY_MS=2500 ./build/src/uq-notes ~/kb.uqn`.
 
 На устройстве, в собранной 0.10.0:
-0. `QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu` - `Totals: 3 passed` на GPU
-   устройства (12.9).
+0. `QT_QPA_PLATFORM=wayland ./build/tests/tst_inkmaterialgpu` - `Totals: 8 passed` на GPU
+   устройства (12.9; шесть тестов и `initTestCase`/`cleanupTestCase`).
 1. Перо 1 pt, масштаб 100%: слово «minimum» и «привет» - линия сплошная, без тёмных
    точек на стыках и бледных провалов.
 2. Самое тонкое перо (0.4 pt), масштаб 50%: линия не распадается на точки.
@@ -10969,11 +10979,10 @@ git commit -m "$(cat <<'EOF'
 обоих сегментов, внешняя дуга - веер вокруг центра стыка, а не из
 внутренней точки: перенос прежнего стыка под бахрому давал на «M» вдвое
 большую ошибку. Торцы - полувеер вокруг точки вместо пар шага 2. На тугих
-петлях внутренний вынос ограничен радиусом кривизны осевой: без предела
-бахрома складывалась, и петля «e» при dpr 2 бледнела. Предел сначала прошёл
-гейт на стенде (tools/stroke-lab/gate-rho.sh) и только потом попал в
-приложение. Радиус хранится длиной направления, поэтому вершина осталась
-в 24 байтах.
+петлях внутренний вынос по радиусу кривизны не ограничивается: предел
+прошёл гейт на стенде (tools/stroke-lab/gate-rho.sh), но вырезал пиксели
+внутри чернил на вершинах арок «m» и «n», а складки бахромы на нынешней
+траектории нет. Вершина - 24 байта.
 
 Батчинг сохранён. Сухие штрихи страницы одного цвета сливаются в батч,
 как раньше. У мокрого слоя свой тип материала, у каждого куска мокрого
@@ -11224,7 +11233,9 @@ Expected: `100% tests passed`.
 Run: `cmake -S . -B build -DUQ_DIAGNOSTICS=ON && cmake --build build -j$(nproc)`
 Expected: сборка без ошибок.
 
-- [x] 15.7 **Аудит элементов окна без MSAA (на устройстве)**
+- [ ] 15.7 **Аудит элементов окна без MSAA (на устройстве)**
+  - [x] прокси на машине разработки (Sway, Iris Xe; dpr 1.25 и 1.75)
+  - [ ] на устройстве (Galaxy Book, KWin, dpr устройства)
 
 > Выполнено как прокси-замер на машине разработки (Sway, Iris Xe, 60 Гц), не на устройстве: заметка к копии `textbook.pdf` с
 > раскрытым и свёрнутым вкладышем (созданы прямо в `.uqn`, SQLite) и чернилами
@@ -11382,7 +11393,10 @@ EOF
 
 ## 16. Завершение изменения
 
-- [ ] 16.1 **Полный прогон тестов**
+- [x] 16.1 **Полный прогон тестов**
+
+> Выполнено после финальной рецензии: `ctest` 26/26, `tst_inkmaterialgpu` под
+> `QT_QPA_PLATFORM=wayland` на Iris Xe - `Totals: 8 passed`.
 
 Run: `cmake --build build -j$(nproc) && ctest --test-dir build --output-on-failure`
 Expected: `100% tests passed` (`tst_idleframes` без графической сессии сообщает SKIP).
@@ -11394,3 +11408,59 @@ Expected: `100% tests passed` (`tst_idleframes` без графической с
 устройстве, которая его закрывает. Сценарии без проверки дописать тестами до
 архивации. Слияние дельт в `openspec/specs/` - при архивации изменения
 (`/opsx:archive`), не в этом плане.
+
+> Сверка после финальной рецензии. «Устройство» - проверка остаётся за пунктом
+> группы 14 или 2.15 и до неё сценарий автоматически закрыт не целиком.
+
+**ink-input, «Штрих пера с учётом нажатия»**
+
+| Сценарий | Чем закрыт |
+| --- | --- |
+| Штрих с нарастающим нажимом | `tst_stroketessellator::widthFollowsPressureSmoothly`, `styleSelectsThicknessLaw` |
+| Перо без данных о давлении | `tst_stroketessellator::missingPressureGivesConstantWidth`; `tst_canvasink::missingPressureStillDraws`, `dryGeometryFollowsStrokeStyle`; `tst_strokesampler::mixedMissingPressureIsNeverBlended` |
+| Отрыв пера | `tst_strokesampler::finishEndsExactlyAtLastContactPoint`; `tst_stroketessellator::capsAreHalfFansAroundEndPoints`; `tst_wetstroke::hookedEndMatchesDryAndFollowsChord`, `wetCapsAreRoundAtEveryStep` |
+| Уверенное начало штриха | `tst_strokesampler::pressureRampLagsAtMost15ms` (синтетика; реальное перо - устройство) |
+| Конец штриха по спаду нажима | `tst_strokesampler::strokeEndFollowsFallingPressureWithoutJump`, `pointPressureIsPenPressureAtPointTime` |
+| Заострение новых штрихов | `tst_canvasink::penStrokesAreTapered`, `dryGeometryFollowsStrokeStyle`; `tst_wetstroke::wetStrokeUsesPrototypeStyle`; `tst_export::exportFollowsStrokeStyle`; гейт B стенда (5.6) |
+
+**ink-input, «Латентность штриха»**
+
+| Сценарий | Чем закрыт |
+| --- | --- |
+| Непрерывное письмо | `tst_wetstroke::perPointWorkDoesNotGrowWithStrokeLength`; бюджет кадра - 14.3 на устройстве |
+| Письмо поверх плотной страницы | `tst_canvasink::liftTessellatesOnlyTheNewStroke`; `tst_pagescenegraph` (пул, недавние штрихи); `tst_inkmaterialgpu::wetInkDoesNotReuploadDryBatch`, `longStrokeNeverReuploadsDryBatch`; бюджет кадра - 14.3 на устройстве |
+| Кончик линии у пера | `tst_wetstroke::stripEndFollowsThePenOnFastArc`; `tst_strokesampler::provisionalTailReachesThePen` |
+| Резкая смена направления | `tst_wetstroke::provisionalTailDoesNotOvershootReversal` |
+| Нанесённый штрих без предварительного участка | `tst_wetstroke::finishedStrokeHasNoPredictedPoints`; `tst_canvasink::finishedStrokeIsTheSameEverywhere`; `tst_export::exportedInkMatchesScreenStrip`; `tst_inkparity` |
+| Замер задержки до показа | `tst_framestats`; `tst_canvasink::inputLatencyStartsAtEventStamp`; `tst_idlepower`; протокол пером - 2.15 на устройстве |
+
+**ink-input, «Касание пером оставляет точку»**
+
+| Сценарий | Чем закрыт |
+| --- | --- |
+| Точка над буквой | `tst_canvasink::tapWithoutMovementLeavesDot`, `dotIsSavedExportedAndErased`; `tst_export::roundEndsAndDotsAreExported`; `tst_wetstroke::tapWithoutMovementGivesDot` |
+| Касание с едва заметным сдвигом | `tst_wetstroke::tinyMovementGivesCapsule`, `shiftedTapHasPeakWidth`; `tst_stroketessellator::strokeShorterThanPenWidthIsCapsule` |
+| Случайный задев | `tst_wetstroke::onlyShortLightTouchIsDiscarded`, `quickFirmTapIsKeptDespiteFilterLag`; `tst_canvasink::accidentalGrazeLeavesNothing` |
+| Касание элемента окна пером | `tst_penonlymode::penTapsOnControlsLeaveNoDot` - кнопка панели, значок вкладыша, пункт оглавления и касание страницы, которым закрывают панель пера (пером и мышью: панель модальна, касание до холста не доходит); `tst_insertoverlay` |
+
+**ink-input, «Сглаживание кромки чернил»**
+
+| Сценарий | Чем закрыт |
+| --- | --- |
+| Тонкая линия на обычном масштабе | `tst_inkcoverage::boxCoverageAcrossTheEdge`, `massEqualsWidthAtAnyThickness`; `tst_inkparity`; `tst_inkmaterialgpu::edgeCoverageMatchesMirrorAtEveryZoom`; вид - 14.6 на устройстве |
+| Самое тонкое перо на отдалённом масштабе | `tst_inkcoverage::floorKeepsThinnestPenVisible`; стенд, `aa_mass_cv` (14.7) |
+| Медленная прокрутка | `tst_inkcoverage::slowScrollDoesNotFlicker` - CPU-зеркало, сдвиги 0, 0.25, 0.5, 0.75 px по обеим осям: мерцание по `aa_flicker` ≤ 6/255 (у зеркала 0.6-3.3, у MSAA 4x 11.6-15.3), размах массы строки ≤ 3%; стенд, `aa_flicker` (14.7); вид - 14.6 на устройстве |
+| Изменение масштаба | `tst_pagescenegraph::zoomDoesNotRebuildInkGeometry`; `tst_idleframes::zoomAndScrollDoNotRebuildWholeScene`; `tst_inkmaterialgpu::edgeCoverageMatchesMirrorAtEveryZoom` |
+| Цветные чернила на тёмной странице | `tst_inkmaterial::colorUniformIsPremultipliedByOpacity` (униформ - премультиплицированный цвет × непрозрачность); `tst_inkmaterialgpu::coloredInkKeepsItsColorOnDarkPage` (на GPU, руками: красный и зелёный на `#101010`, каналы - смешивание over в пределах 3/255); вид поверх PDF - 14.6 на устройстве |
+
+**note-storage, «Закон толщины хранится со штрихом»**
+
+| Сценарий | Чем закрыт |
+| --- | --- |
+| Заметка прежней версии | `tst_notestore::migratesSchemaVersionTwoNote` |
+| Штрих после повторного открытия | `tst_notestore::roundTripsStrokeStyle`; `tst_crashrecovery` |
+| Отмена и повтор | `tst_inkdocument::undoRedoKeepStrokeStyle` |
+| Открытие прежней версией приложения | `tst_notestore::previousVersionQueriesWorkOnSchemaThree`, `secondInstanceOpensSchemaThreeNote` |
+
+Сценариев без проверки нет. Не закрыты автоматически целиком только части,
+которые требуют пера и экрана устройства: 2.15, 14.3, 14.4, 14.6.

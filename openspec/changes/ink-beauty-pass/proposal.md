@@ -57,6 +57,10 @@
 - **Вид ранее нанесённых штрихов меняется:** они получают круглые концы и
   новую кромку. Толщина, положение и форма их линии не меняются. Давление,
   заострение, нарезка и шумоподавление относятся только к новым штрихам.
+- **Точки в прежних версиях.** Точка от касания хранится штрихом из почти
+  совпадающих точек. Версии до 0.9.0 рисуют такой штрих плоскими торцами: при
+  касании без сдвига - ничего, при едва заметном - чёрточку. Данные при этом
+  не теряются.
 
 ## Capabilities
 
@@ -83,19 +87,42 @@
 - `src/ink/wetstroke.*`: те же вершины и торцы для мокрого штриха, правило
   касания.
 - `src/ink/inktypes.h`: `Stroke::style`.
+- `src/ink/inkcoverage.h`: CPU-зеркало шейдеров - покрытие кромки для тестов
+  паритета и стенда.
 - Новый материал чернил: `src/canvas/inkmaterial.*`, шейдеры
   `src/canvas/shaders/ink.vert` и `ink.frag` через `qt_add_shaders`.
-  `src/canvas/documentcanvas.cpp` переходит на него с `QSGFlatColorMaterial`.
-- `src/main.cpp`: `setSamples(0)` за переключателем `UQ_MSAA`.
+  `src/canvas/documentcanvas.*` переходит на него с `QSGFlatColorMaterial`.
+- `src/canvas/inknodepool.*` и `src/canvas/documentcanvas.*`: пулы узлов
+  мокрого слоя и недавних штрихов, перенос по простою, инкрементальная
+  тесселяция, запас узлов страниц (design.md, D10); рамка вкладыша по целым
+  device px.
+- `src/canvas/surfaceformat.*`: число сэмплов окна, по умолчанию 0,
+  переключатель `UQ_MSAA`; `src/main.cpp` берёт формат оттуда, там же
+  `UQ_DEMO_STROKE_MS` сценарного письма.
+- `src/qml/Main.qml`: шапка окна с обрезкой, сводка `UQ_FRAME_LOG` своим
+  слоем (D10), панель пера модальна - касание мимо неё не оставляет точку.
 - `src/storage/notestore.cpp`: схема 3, колонка `style` в `stroke` и
   `insert_stroke`.
 - `src/export/noteexporter.cpp`: заливка нового контура.
-- `src/perf/framestats.*`: метка времени события, задержка до показа.
-- `tools/stroke-lab/`, `CMakeLists.txt` (опция `UQ_BUILD_STROKE_LAB`).
-- Тесты: `tst_strokesampler`, `tst_wetstroke`, `tst_stroketessellator`,
-  `tst_canvasink`, `tst_export`, `tst_notestore` - правка эталонов там, где
-  меняется спека, и новые эталоны.
-- `PERFORMANCE.md`: как теперь меряется латентность.
+- `src/perf/framestats.*`: метка времени события, задержка до показа;
+  `src/perf/presentationfeedback.*`, `src/perf/presentationstats.*` -
+  подписка на `wp_presentation_feedback` и её сводка.
+- Сборка: `CMakeLists.txt` - язык C (код протокола от `wayland-scanner`),
+  Qt ShaderTools, опции `UQ_BUILD_STROKE_LAB` и `UQ_WP_PRESENTATION`;
+  `src/CMakeLists.txt` - шейдеры, Qt6::GuiPrivate, `wayland-client`,
+  `wayland-scanner` и `wayland-protocols` для замера задержки до показа (без
+  них он не собирается). `packaging/PKGBUILD` и `README.md` - те же
+  зависимости.
+- `tools/stroke-lab/`: стенд, по умолчанию не собирается.
+- Тесты: правка эталонов и новые случаи в `tst_strokesampler`,
+  `tst_wetstroke`, `tst_stroketessellator`, `tst_canvasink`, `tst_export`,
+  `tst_notestore`, `tst_inkdocument`, `tst_crashrecovery`, `tst_framestats`,
+  `tst_idleframes`, `tst_idlepower`, `tst_pagescenegraph`, `tst_penonlymode`,
+  `tst_insertoverlay`; новые `tst_inkcoverage`, `tst_inkmaterial`,
+  `tst_inkmaterialgpu` (на GPU, руками), `tst_inkparity`, `tst_surfaceformat`;
+  `tests/support/inkraster.h` - растр полосы по формулам материала.
+- `PERFORMANCE.md`: как теперь меряется латентность, материал чернил, MSAA.
 - Формат `.uqn`: у точки по-прежнему x, y и давление; у штриха появляется
   колонка закона толщины. Заметка, открытая прежней версией приложения,
-  открывается, но новые штрихи там рисуются прежним законом.
+  открывается, но новые штрихи там рисуются прежним законом, а точки от
+  касания - ничем или чёрточкой.
