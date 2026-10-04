@@ -402,9 +402,23 @@ private slots:
         QTRY_COMPARE(m_canvas->currentPage(), 12);
         QCOMPARE(ink->strokeCount(), 0);
 
-        // Контроль: касание страницы тем же пером - точка.
+        // Касание страницы, которым закрывают всплывающую панель пера, панель
+        // закрывает и точки не оставляет - ни пером, ни мышью. У мыши нет
+        // нажима, и правило задева (D5) такое касание не отбросило бы: оно не
+        // должно доходить до холста вовсе.
         settle();
         QVERIFY(m_canvas->pageAtView(m_canvas->mapFromScene(canvasCenter())) >= 0);
+        auto *penPopup = m_window->findChild<QObject *>(QStringLiteral("penPopup"));
+        QVERIFY(penPopup);
+        for (const QPointingDevice *device : {stylus(), QPointingDevice::primaryPointingDevice()}) {
+            QMetaObject::invokeMethod(penPopup, "open");
+            QTRY_VERIFY(penPopup->property("opened").toBool());
+            click(m_window, canvasCenter(), device);
+            QTRY_VERIFY(!penPopup->property("visible").toBool());
+            QCOMPARE(ink->strokeCount(), 0);
+        }
+
+        // Контроль: касание страницы тем же пером - точка.
         penClick(m_window, canvasCenter());
         QCOMPARE(ink->strokeCount(), 1);
     }
