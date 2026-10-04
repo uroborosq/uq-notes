@@ -480,6 +480,83 @@ private slots:
         QCOMPARE(canvas->inkMaterialStats(0).foreignNodes, 0);
     }
 
+    // Узлы мокрого слоя - пул, живущий вместе с узлом страницы: касание пером
+    // и следующий штрих узлов не добавляют. Добавление узла под корнем батча
+    // перезалило бы слитый батч сухих чернил страницы (design.md
+    // ink-beauty-pass, D7). Опустевший после отрыва кусок обязан ожить со
+    // следующим штрихом.
+    void wetLayerReusesNodePool()
+    {
+        Canvas fixture;
+        QVERIFY(fixture.open(fixtures::large()));
+        DocumentCanvas *canvas = fixture.canvas;
+
+        canvas->goToPage(0);
+        QVERIFY(renderUntil(&fixture.window,
+                            [canvas] { return !canvas->textureSizeOf(0).isEmpty(); }));
+        drawLine(canvas, QPointF(350, 300), QPointF(550, 300));
+        renderFrames(&fixture.window, 3);
+
+        // Пул уже есть до касания, пустой.
+        const int pool = canvas->inkMaterialStats(0).wetPoolNodes;
+        QVERIFY(pool > 1);
+        QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 0);
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), -1);
+
+        qreal time = 3.0;
+        const auto stroke = [&](qreal y, int samples) {
+            QVERIFY(canvas->beginInkAt(QPointF(300, y), 0.6, false, time));
+            for (int i = 1; i <= samples; ++i) {
+                time += 1.0 / 240.0;
+                canvas->continueInkAt(QPointF(300 + i * 0.9, y + 30.0 * std::sin(i / 5.0)), 0.6,
+                                      time);
+            }
+            renderFrames(&fixture.window, 1);
+        };
+
+        // Касание и короткий штрих - в пределах пула.
+        stroke(420, 40);
+        QVERIFY(canvas->wetStripVertexCount() >= 4);
+        QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 1);
+        QCOMPARE(canvas->inkMaterialStats(0).wetPoolNodes, pool);
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), canvas->wetStripVertexCount());
+        canvas->endInk();
+        renderFrames(&fixture.window, 2);
+        QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 0);
+        QCOMPARE(canvas->inkMaterialStats(0).wetPoolNodes, pool);
+
+        // Длинный штрих переполняет пул: он растёт один раз.
+        stroke(480, 400);
+        const int strip = canvas->wetStripVertexCount();
+        const int grown = canvas->inkMaterialStats(0).wetPoolNodes;
+        QVERIFY(grown > pool);
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), strip);
+        canvas->endInk();
+        renderFrames(&fixture.window, 2);
+        QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 0);
+
+        // Такой же следующий штрих рисуется опустевшими кусками того же пула.
+        stroke(560, 400);
+        const DocumentCanvas::InkMaterialStats second = canvas->inkMaterialStats(0);
+        QVERIFY(second.wetNodes > 1);
+        QCOMPARE(second.wetPoolNodes, grown);
+        QCOMPARE(second.foreignNodes, 0);
+        QVERIFY(second.wetChunksSeparate);
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), canvas->wetStripVertexCount());
+
+        // Отрыв и касание без кадра между ними: новый штрих не наследует
+        // куски прошлого.
+        canvas->endInk();
+        stroke(640, 20);
+        QVERIFY(canvas->wetStripVertexCount() >= 4);
+        QCOMPARE(canvas->inkMaterialStats(0).wetNodes, 1);
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), canvas->wetStripVertexCount());
+        canvas->endInk();
+        renderFrames(&fixture.window, 2);
+        QCOMPARE(canvas->inkMaterialStats(0).wetPoolNodes, grown);
+        QCOMPARE(canvas->wetInkCoveredVertexCount(0), -1);
+    }
+
     // Сценарий «Изменение масштаба» (ink-input, «Сглаживание кромки чернил»):
     // кромка пересчитывается в шейдере, геометрия штрихов не пересобирается.
     void zoomDoesNotRebuildInkGeometry()

@@ -155,11 +155,14 @@ public:
     // Чем нарисованы чернила страницы (design.md ink-beauty-pass, D7). Узел
     // «чужой», если он не на InkMaterial своего слоя или вершина не AxisVertex.
     // Типы сухого и мокрого слоёв обязаны различаться, а куски мокрого штриха -
-    // не совпадать по compare(), иначе батч-рендер их сольёт.
+    // не совпадать по compare(), иначе батч-рендер их сольёт. Куски мокрого
+    // слоя - пул, живущий вместе с узлом страницы: wetNodes - куски с
+    // вершинами, wetPoolNodes - все узлы пула.
     struct InkMaterialStats
     {
         int dryNodes = 0;
         int wetNodes = 0;
+        int wetPoolNodes = 0;
         int foreignNodes = 0;
         bool dryAndWetTypesDiffer = true;
         bool wetChunksSeparate = true;
@@ -428,6 +431,9 @@ private:
 
     WetStroke m_wet;
     int m_wetPage = -1;
+    // Номер мокрого штриха: растёт на каждом касании. По нему пул кусков
+    // мокрого слоя отличает новый штрих от продолжения старого.
+    int m_wetStrokeSerial = 0;
     QList<quint64> m_erasedInCurrentStroke;
 
     QHash<int, QList<StrokeGeometry>> m_inkGeometry;

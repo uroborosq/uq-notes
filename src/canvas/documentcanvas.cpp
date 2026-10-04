@@ -77,8 +77,20 @@ struct InkLayerNodes
     // Мокрый штрих разложен на куски постоянного размера: заполненный кусок
     // больше не трогается, а на кадр перезаливается только последний,
     // незаполненный. Так объём работы на кадр не зависит от длины штриха.
+    //
+    // Слой и куски - пул, который живёт, пока живёт узел поверхности: между
+    // штрихами куски пустеют, а не удаляются. Добавление любого узла под
+    // корнем батча заставляет батч-рендер Qt Quick пересобрать все батчи
+    // этого корня, и слитый батч сухих чернил плотной страницы (десятки МБ)
+    // перезаливался бы на каждом касании пером и на каждом новом куске
+    // (design.md ink-beauty-pass, D7).
     QSGNode *wetInk = nullptr;
     QList<QSGGeometryNode *> wetChunks;
+    // Сколько кусков пула заняты нынешним штрихом; остальные пусты.
+    int wetUsedChunks = 0;
+    // Номер штриха, который лежит в кусках: по нему виден новый штрих, даже
+    // если между отрывом и касанием не было кадра.
+    int wetStrokeSerial = -1;
     // Длина окончательной части полосы мокрого штриха на прошлом кадре: до неё
     // куски не перезаливаются.
     int wetSettledCount = 0;
@@ -205,6 +217,10 @@ namespace {
 // вершины): треугольник i - это вершины i, i+1, i+2.
 constexpr int kWetChunkVertices = 512;
 constexpr int kWetChunkOverlap = 2;
+// Кусков в пуле мокрого слоя с самого начала: около 2000 вершин, обычный
+// штрих рукописи короче. Длинный штрих удваивает пул, и узлы добавляются
+// только при первом таком переполнении на поверхности.
+constexpr int kWetPoolInitialChunks = 4;
 
 static_assert(sizeof(StrokeTessellator::Vertex) == 24, "раскладка InkMaterial::attributes()");
 
@@ -234,6 +250,29 @@ void uploadStrip(QSGGeometryNode *node, const StrokeTessellator::Vertex *source,
     geometry->allocate(count);
     std::memcpy(geometry->vertexData(), source, size_t(count) * sizeof(StrokeTessellator::Vertex));
     node->markDirty(QSGNode::DirtyGeometry);
+}
+
+// Пустой кусок пула: без вершин он не попадает ни в один батч и не рисуется.
+void clearWetChunk(QSGGeometryNode *node)
+{
+    node->geometry()->allocate(0);
+    node->markDirty(QSGNode::DirtyGeometry);
+}
+
+// Кусок пула под новый штрих. Пустой кусок батча не имеет, а DirtyGeometry у
+// элемента без батча перестройку батчей не заказывает - кусок остался бы
+// невидимым. DirtyMaterial заказывает её (BuildBatches): батч получают только
+// элементы без батча, слитый батч сухих чернил не трогается.
+void reviveWetChunk(QSGGeometryNode *node, const QColor &color)
+{
+    static_cast<InkMaterial *>(node->material())->setColor(color);
+    node->markDirty(QSGNode::DirtyMaterial);
+}
+
+// В пуле лежит мокрый штрих: хотя бы один кусок с вершинами.
+bool hasWetInk(const InkLayerNodes &layer)
+{
+    return layer.wetUsedChunks > 0;
 }
 
 int wetChunkStart(int index)
@@ -345,15 +384,19 @@ QVector<StrokeTessellator::Vertex> DocumentCanvas::inkGeometryStrip(int page, qu
 
 namespace {
 
-// Докуда куски мокрого штриха покрывают полосу, в вершинах; -1 - узла нет.
+// Докуда куски мокрого штриха покрывают полосу, в вершинах; -1 - мокрого
+// штриха нет (все куски пула пусты).
 int wetCoveredVertexCount(const InkLayerNodes &layer)
 {
-    if (!layer.wetInk)
+    if (!hasWetInk(layer))
         return -1;
     int covered = 0;
     for (int index = 0; index < layer.wetChunks.size(); ++index) {
-        covered = qMax(covered,
-                       wetChunkStart(index) + layer.wetChunks[index]->geometry()->vertexCount());
+        // Пустой кусок пула ничего не покрывает; кусок со старой геометрией
+        // за концом полосы - покрывает и даёт число больше её длины.
+        const int count = layer.wetChunks[index]->geometry()->vertexCount();
+        if (count > 0)
+            covered = qMax(covered, wetChunkStart(index) + count);
     }
     return covered;
 }
@@ -379,7 +422,10 @@ int DocumentCanvas::wetInsertCoveredVertexCount(quint64 id) const
 DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
 {
     PageSceneNode *node = m_nodes.value(page);
-    if (!node || !node->texture || (!node->ink.dryInk && !node->ink.wetInk))
+    // Слой мокрого штриха живёт и между штрихами, пустым: чернилами он
+    // считается, только пока в нём есть вершины.
+    const bool wet = node && hasWetInk(node->ink);
+    if (!node || !node->texture || (!node->ink.dryInk && !wet))
         return InkLayering::Incomplete;
 
     bool rasterSeen = false;
@@ -391,7 +437,7 @@ DocumentCanvas::InkLayering DocumentCanvas::inkLayering(int page) const
             if (!rasterSeen)
                 return InkLayering::BelowRaster;
             dryInkSeen = true;
-        } else if (child == node->ink.wetInk) {
+        } else if (child == node->ink.wetInk && wet) {
             if (!rasterSeen)
                 return InkLayering::BelowRaster;
             if (node->ink.dryInk && !dryInkSeen)
@@ -415,12 +461,18 @@ DocumentCanvas::InkMaterialStats DocumentCanvas::inkMaterialStats(int page) cons
             return;
         const bool wet = expected == InkMaterial::Layer::Wet;
         for (QSGNode *child = layer->firstChild(); child; child = child->nextSibling()) {
-            ++(wet ? stats.wetNodes : stats.dryNodes);
+            if (wet)
+                ++stats.wetPoolNodes;
+            else
+                ++stats.dryNodes;
             if (child->type() != QSGNode::GeometryNodeType) {
                 ++stats.foreignNodes;
                 continue;
             }
             auto *geometryNode = static_cast<QSGGeometryNode *>(child);
+            // Пустой кусок пула мокрого слоя не рисуется и штрихом не считается.
+            if (wet && geometryNode->geometry()->vertexCount() > 0)
+                ++stats.wetNodes;
             const auto *material = dynamic_cast<const InkMaterial *>(geometryNode->material());
             if (!material || material->layer() != expected
                 || geometryNode->geometry()->sizeOfVertex() != int(sizeof(AxisVertex))) {
@@ -1223,50 +1275,72 @@ void DocumentCanvas::updateWetInkNodes(InkLayerNodes &layer, bool active,
 {
     const QVector<StrokeTessellator::Vertex> &strip = m_wet.strip();
 
-    if (!active || strip.size() < 4) {
-        if (layer.wetInk) {
-            layer.wetInk->parent()->removeChildNode(layer.wetInk);
-            delete layer.wetInk;
-            layer.wetInk = nullptr;
-            layer.wetChunks.clear();
-            layer.wetSettledCount = 0;
-        }
-        return;
-    }
-
+    // Слой и начальный пул появляются вместе с узлом поверхности, в том же
+    // кадре, что и остальные его узлы, - не на касании пером.
     if (!layer.wetInk) {
         layer.wetInk = new QSGNode;
         attach(layer.wetInk, true);
         layer.wetChunks.clear();
+        layer.wetUsedChunks = 0;
         layer.wetSettledCount = 0;
+        while (layer.wetChunks.size() < kWetPoolInitialChunks) {
+            // Номер куска - ключ батча: куски не сливаются в один батч.
+            QSGGeometryNode *chunk = makeStripNode(m_penColor, InkMaterial::Layer::Wet,
+                                                   int(layer.wetChunks.size()));
+            layer.wetInk->appendChildNode(chunk);
+            layer.wetChunks.append(chunk);
+        }
     }
 
     const int needed =
-        qMax(1, (strip.size() - kWetChunkOverlap + kWetChunkVertices - kWetChunkOverlap - 1)
-                    / (kWetChunkVertices - kWetChunkOverlap));
+        !active || strip.size() < 4
+            ? 0
+            : qMax(1, (strip.size() - kWetChunkOverlap + kWetChunkVertices - kWetChunkOverlap - 1)
+                          / (kWetChunkVertices - kWetChunkOverlap));
 
-    while (layer.wetChunks.size() < needed) {
-        // Номер куска - ключ батча: куски не сливаются в один батч.
-        QSGGeometryNode *chunk = makeStripNode(m_penColor, InkMaterial::Layer::Wet,
-                                               int(layer.wetChunks.size()));
-        layer.wetInk->appendChildNode(chunk);
-        layer.wetChunks.append(chunk);
+    // Новый штрих - всё с начала, даже если прошлый не успел опустеть: между
+    // отрывом и касанием кадра могло не быть.
+    if (needed > 0 && layer.wetStrokeSerial != m_wetStrokeSerial) {
+        layer.wetStrokeSerial = m_wetStrokeSerial;
+        layer.wetSettledCount = 0;
+        for (int index = 0; index < layer.wetUsedChunks; ++index)
+            reviveWetChunk(layer.wetChunks[index], m_penColor);
     }
-    // Полоса мокрого штриха может укоротиться: провизорный хвост пересобирается
-    // на каждом отсчёте. Куски за её концом снимаются, а не остаются рисовать
-    // прошлую геометрию.
-    while (layer.wetChunks.size() > needed) {
-        QSGGeometryNode *chunk = layer.wetChunks.takeLast();
-        layer.wetInk->removeChildNode(chunk);
-        delete chunk;
+
+    // Куски за концом полосы пустеют, а не удаляются: полоса укорачивается,
+    // когда пересобирается провизорный хвост, а после отрыва пустеют все.
+    for (int index = needed; index < layer.wetUsedChunks; ++index)
+        clearWetChunk(layer.wetChunks[index]);
+    if (needed == 0) {
+        layer.wetUsedChunks = 0;
+        layer.wetSettledCount = 0;
+        return;
     }
+
+    // Пул растёт вдвое: длинный штрих добавляет узлы только при первом
+    // переполнении, следующие такие же обходятся без добавления.
+    if (needed > layer.wetChunks.size()) {
+        const int target = qMax(needed, 2 * int(layer.wetChunks.size()));
+        while (layer.wetChunks.size() < target) {
+            QSGGeometryNode *chunk = makeStripNode(m_penColor, InkMaterial::Layer::Wet,
+                                                   int(layer.wetChunks.size()));
+            layer.wetInk->appendChildNode(chunk);
+            layer.wetChunks.append(chunk);
+        }
+    }
+    for (int index = layer.wetUsedChunks; index < needed; ++index)
+        reviveWetChunk(layer.wetChunks[index], m_penColor);
+    const int previouslyUsed = layer.wetUsedChunks;
+    layer.wetUsedChunks = needed;
 
     // Перезаливается всё, начиная с куска, где на прошлом кадре кончалась
     // окончательная часть полосы: до неё вершины не меняются никогда, а после
-    // неё мог смениться весь провизорный хвост (design.md, D5).
+    // неё мог смениться весь провизорный хвост (design.md, D5). Кусок, занятый
+    // только сейчас, заливается в любом случае.
     const int firstChanged = qMin(layer.wetSettledCount, int(strip.size()));
     const int firstDirty =
-        qMax(0, (firstChanged - kWetChunkOverlap) / (kWetChunkVertices - kWetChunkOverlap));
+        qMin(previouslyUsed,
+             qMax(0, (firstChanged - kWetChunkOverlap) / (kWetChunkVertices - kWetChunkOverlap)));
     for (int index = firstDirty; index < needed; ++index) {
         const int start = wetChunkStart(index);
         // Кусок с номером меньше needed всегда начинается раньше двух последних
@@ -1487,6 +1561,7 @@ bool DocumentCanvas::beginInkAt(const QPointF &viewPoint, qreal pressure, bool e
     // Масштаб фиксируется на начало штриха: пока перо в контакте, жесты не
     // начинаются, поэтому внутри штриха он не меняется.
     m_wet.begin(page, prototype, m_zoom);
+    ++m_wetStrokeSerial;
     // Чернила складываются в координатах поверхности - страницы или вкладыша,
     // а не экрана.
     m_wet.addPoint({surfacePoint(viewPoint), pressure, inputTimeSeconds(timeSeconds)});
